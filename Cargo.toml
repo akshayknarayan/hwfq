@@ -1,0 +1,13 @@
+[package]
+name = "hwfq"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tun-tap = "0.1"
+etherparse = "0.10"
+socket2 = { version = "0.4", features = ["all"] }
+pnet = "0.29"
+libc = "0.2"
+tracing = "0.1"
+color-eyre = "0.6"
