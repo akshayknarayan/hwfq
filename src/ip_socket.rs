@@ -33,11 +33,12 @@ impl IpIfaceSocket {
         })
     }
 
-    pub fn send(&self, buf: &mut [u8], ip_hdr: Ipv4Header) -> Result<(), Report> {
+    pub fn send(&self, buf: &mut [u8], mut ip_hdr: Ipv4Header) -> Result<(), Report> {
         let len = buf.len();
 
         // if the src ip addr is our own, clear it
         if ip_hdr.source == [100, 64, 0, 1] {
+            ip_hdr.source = self.bound_iface_src_ip.octets();
             buf[12..16].copy_from_slice(&[0u8; 4]);
         }
 
