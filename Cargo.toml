@@ -3,6 +3,9 @@ name = "hwfq"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+bin = ["structopt", "tracing-subscriber"]
+
 [dependencies]
 tun-tap = "0.1"
 etherparse = "0.10"
@@ -11,3 +14,9 @@ pnet = "0.29"
 libc = "0.2"
 tracing = "0.1"
 color-eyre = "0.6"
+structopt = { version = "0.3", optional = true }
+tracing-subscriber  = { version = "0.3", optional = true }
+
+[[bin]]
+name = "hwfq"
+required-features = ["bin"]

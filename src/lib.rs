@@ -1,6 +1,6 @@
 use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
-use std::net::Ipv4Addr;
 use std::process::Command;
+use tracing::{debug, info, trace};
 use tun_tap::Iface;
 
 mod ip_socket;
@@ -29,39 +29,40 @@ impl HwfqScheduler {
     }
 
     pub fn run(self) -> Result<(), Report> {
+        info!(iface=?self.iface.name(), "starting");
+
         let mut buf = [0u8; 2048];
         loop {
             let len = self.iface.recv(&mut buf)?;
             if len < 4 {
-                println!("packet too small: {:?}", 4);
+                debug!(?len, "packet too small");
                 continue;
             }
 
             let recv_buf = &buf[4..len];
-            let dst_addr = match get_ipv4_dst(recv_buf) {
+            let ip_hdr = match get_ipv4_dst(recv_buf) {
                 Ok(a) => a,
                 Err(e) => {
-                    println!("err: {:#?}", e);
+                    debug!(?e, "could not parse packet as ipv4");
                     continue;
                 }
             };
 
-            println!("got: {:?}", recv_buf);
+            trace!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "forwarding packet");
 
             // rewrite ip src addr
             let out_buf = &mut buf[4..len];
             out_buf[12..16].copy_from_slice(&[0u8; 4]);
 
-            println!("sending to {:?}", dst_addr);
             self.fwd.send(out_buf)?;
         }
     }
 }
 
-fn get_ipv4_dst(buf: &[u8]) -> Result<Ipv4Addr, Report> {
+fn get_ipv4_dst(buf: &[u8]) -> Result<etherparse::Ipv4Header, Report> {
     let p = etherparse::PacketHeaders::from_ip_slice(buf)?;
     let ip_hdr = get_ipv4_hdr(p)?;
-    Ok(ip_hdr.destination.into())
+    Ok(ip_hdr)
 }
 
 fn add_ip_addr(dev: &str, ip_with_prefix: &str) -> Result<(), Report> {
