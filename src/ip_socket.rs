@@ -1,4 +1,5 @@
 use color_eyre::eyre::{ensure, eyre, Report, WrapErr};
+use etherparse::{Ipv4Header, TransportHeader};
 use socket2::{Domain, Socket, Type};
 use std::net::Ipv4Addr;
 use std::os::unix::io::AsRawFd;
@@ -32,8 +33,33 @@ impl IpIfaceSocket {
         })
     }
 
-    pub fn send(&self, buf: &[u8]) -> Result<(), Report> {
+    pub fn send(&self, buf: &mut [u8], ip_hdr: Ipv4Header) -> Result<(), Report> {
         let len = buf.len();
+
+        // if the src ip addr is our own, clear it
+        if ip_hdr.source == [100, 64, 0, 1] {
+            buf[12..16].copy_from_slice(&[0u8; 4]);
+        }
+
+        let p = etherparse::PacketHeaders::from_ip_slice(buf)?;
+        let transp_hdr_start = ip_hdr.header_len();
+
+        match p.transport {
+            Some(TransportHeader::Udp(u)) => {
+                // clear udp checksum
+                let udp_hdr = &mut buf[transp_hdr_start..transp_hdr_start + u.header_len()];
+                udp_hdr[6..8].copy_from_slice(&[0u8; 2]);
+            }
+            Some(TransportHeader::Tcp(tcp_hdr)) => {
+                // calculate new tcp checksum
+                let tcp_csum = tcp_hdr.calc_checksum_ipv4(&ip_hdr, p.payload)?;
+                let tcp_hdr_buf =
+                    &mut buf[transp_hdr_start..transp_hdr_start + tcp_hdr.header_len() as usize];
+                tcp_hdr_buf[16..18].copy_from_slice(&tcp_csum.to_be_bytes());
+            }
+            None => (),
+        }
+
         let s_addr = u32::from_be_bytes(self.bound_iface_src_ip.octets());
         let res = unsafe {
             let addr: libc::sockaddr = std::mem::transmute(libc::sockaddr_in {
