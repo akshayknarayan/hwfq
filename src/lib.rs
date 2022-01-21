@@ -6,12 +6,12 @@ use tun_tap::Iface;
 mod ip_socket;
 pub use ip_socket::IpIfaceSocket;
 
-pub struct HwfqScheduler {
+pub struct Datapath {
     iface: Iface,
     fwd: ip_socket::IpIfaceSocket,
 }
 
-impl HwfqScheduler {
+impl Datapath {
     pub fn new(fwd_iface: String) -> Result<Self, Report> {
         let iface =
             Iface::new("hwfq-%d", tun_tap::Mode::Tun).wrap_err("could not create TUN interface")?;

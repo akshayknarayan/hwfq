@@ -1,5 +1,5 @@
 use color_eyre::eyre::Report;
-use hwfq::HwfqScheduler;
+use hwfq::Datapath;
 use structopt::Structopt;
 
 #[derive(Structopt, Debug)]
@@ -15,6 +15,6 @@ pub fn main() -> Resut<(), Report> {
 
     let opt = Opt::from_args();
 
-    let s = HwfqScheduler::new(opt.interface_name).unwrap();
+    let s = Datapath::new(opt.interface_name).unwrap();
     s.run().unwrap();
 }
