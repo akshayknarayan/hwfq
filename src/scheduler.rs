@@ -1,6 +1,7 @@
 use super::Pkt;
 use color_eyre::eyre::{ensure, Report};
 use std::collections::VecDeque;
+use tracing::trace;
 
 pub trait Scheduler {
     /// Enqueue a packet into the scheduler's queue.
@@ -39,6 +40,7 @@ impl Scheduler for Fifo {
         ensure!(new_qsize_bytes <= self.limit_bytes, "Dropping packet");
         self.cur_qsize_bytes = new_qsize_bytes;
         self.inner.push_back(p);
+        trace!(pkts=?self.inner.len(), "queue size");
         Ok(now_active)
     }
 

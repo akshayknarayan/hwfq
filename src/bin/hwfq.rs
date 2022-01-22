@@ -9,6 +9,9 @@ struct Opt {
     interface_name: String,
 
     #[structopt(short, long)]
+    no_pacing: bool,
+
+    #[structopt(short, long)]
     rate_bytes_per_sec: usize,
 
     #[structopt(short, long)]
@@ -23,6 +26,7 @@ pub fn main() -> Result<(), Report> {
 
     let s = Datapath::new(
         opt.interface_name,
+        opt.no_pacing,
         opt.rate_bytes_per_sec,
         opt.queue_size_bytes,
     )
