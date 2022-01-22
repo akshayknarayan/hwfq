@@ -2,7 +2,7 @@ use color_eyre::{
     eyre::{eyre, Report},
     Help,
 };
-use hwfq::scheduler::Fifo;
+use hwfq::scheduler::{Drr, Fifo};
 use hwfq::Datapath;
 use structopt::StructOpt;
 
@@ -41,6 +41,18 @@ pub fn main() -> Result<(), Report> {
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
                 ),
                 Fifo::new(opt.queue_size_bytes),
+            )
+            .unwrap();
+            s.run().unwrap();
+        }
+        "drr" => {
+            let s = Datapath::new(
+                opt.interface_name,
+                Some(
+                    opt.rate_bytes_per_sec
+                        .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
+                ),
+                Drr::new(opt.queue_size_bytes),
             )
             .unwrap();
             s.run().unwrap();
