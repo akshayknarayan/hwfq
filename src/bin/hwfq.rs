@@ -1,4 +1,8 @@
-use color_eyre::eyre::Report;
+use color_eyre::{
+    eyre::{eyre, Report},
+    Help,
+};
+use hwfq::scheduler::Fifo;
 use hwfq::Datapath;
 use structopt::StructOpt;
 
@@ -9,13 +13,13 @@ struct Opt {
     interface_name: String,
 
     #[structopt(short, long)]
-    no_pacing: bool,
-
-    #[structopt(short, long)]
-    rate_bytes_per_sec: usize,
+    rate_bytes_per_sec: Option<usize>,
 
     #[structopt(short, long)]
     queue_size_bytes: usize,
+
+    #[structopt(short, long)]
+    scheduler: String,
 }
 
 pub fn main() -> Result<(), Report> {
@@ -24,13 +28,27 @@ pub fn main() -> Result<(), Report> {
 
     let opt = Opt::from_args();
 
-    let s = Datapath::new(
-        opt.interface_name,
-        opt.no_pacing,
-        opt.rate_bytes_per_sec,
-        opt.queue_size_bytes,
-    )
-    .unwrap();
-    s.run().unwrap();
+    match opt.scheduler.as_str() {
+        "none" => {
+            let s = Datapath::new(opt.interface_name, None, Fifo::new(0)).unwrap();
+            s.run().unwrap();
+        }
+        "fifo" => {
+            let s = Datapath::new(
+                opt.interface_name,
+                Some(
+                    opt.rate_bytes_per_sec
+                        .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
+                ),
+                Fifo::new(opt.queue_size_bytes),
+            )
+            .unwrap();
+            s.run().unwrap();
+        }
+        s => {
+            return Err(eyre!("unknown scheduler {:?}", s))
+                .note("supported schedulers are [none, fifo]")
+        }
+    }
     unreachable!()
 }

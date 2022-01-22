@@ -6,27 +6,25 @@ use tun_tap::Iface;
 mod ip_socket;
 pub use ip_socket::IpIfaceSocket;
 
-mod scheduler;
-use scheduler::Fifo;
-pub use scheduler::Scheduler;
+pub mod scheduler;
+use scheduler::Scheduler;
 
-pub struct Datapath {
+pub struct Datapath<S: Scheduler> {
     iface: Iface,
-    out_port: OutputPort,
+    out_port: OutputPort<S>,
 }
 
-impl Datapath {
+impl<S: Scheduler + Send + 'static> Datapath<S> {
     pub fn new(
         fwd_iface: String,
-        no_pacing: bool,
-        tx_rate_bytes_per_sec: usize,
-        qsize_bytes: usize,
+        tx_rate_bytes_per_sec: Option<usize>,
+        sch: S,
     ) -> Result<Self, Report> {
         let iface =
             Iface::new("hwfq-%d", tun_tap::Mode::Tun).wrap_err("could not create TUN interface")?;
         let this = Self {
             iface,
-            out_port: OutputPort::new(fwd_iface, no_pacing, tx_rate_bytes_per_sec, qsize_bytes)?,
+            out_port: OutputPort::new(fwd_iface, tx_rate_bytes_per_sec, sch)?,
         };
         this.config_ip()?;
         Ok(this)
@@ -55,7 +53,7 @@ impl Datapath {
             let ip_hdr = match parse_and_get_ipv4_dst(recv_buf) {
                 Ok(a) => a,
                 Err(e) => {
-                    debug!(?e, "could not parse packet as ipv4");
+                    debug!(err = %format!("{:#?}", e), "could not parse packet as ipv4");
                     continue;
                 }
             };
@@ -88,35 +86,32 @@ struct Rate {
     bytes: usize,
 }
 
-struct OutputPort {
+struct OutputPort<S> {
     fwd: ip_socket::IpIfaceSocket,
-    no_pacing: bool,
-    tx_rate_bytes_per_sec: usize,
-    queue: Fifo,
+    tx_rate_bytes_per_sec: Option<usize>,
+    queue: S,
 }
 
-impl OutputPort {
+impl<S: Scheduler + Send + 'static> OutputPort<S> {
     fn new(
         out_iface: String,
-        no_pacing: bool,
-        tx_rate_bytes_per_sec: usize,
-        qsize_bytes: usize,
+        tx_rate_bytes_per_sec: Option<usize>,
+        sch: S,
     ) -> Result<Self, Report> {
         let fwd = ip_socket::IpIfaceSocket::new(out_iface)?;
         Ok(Self {
             fwd,
-            no_pacing,
             tx_rate_bytes_per_sec,
-            queue: Fifo::new(qsize_bytes),
+            queue: sch,
         })
     }
 
     fn start(self) -> Result<flume::Sender<Pkt>, Report> {
         let (s, r) = flume::unbounded();
-        if self.no_pacing {
-            std::thread::spawn(move || self.run_no_pacing(r));
+        if let Some(tx_rate_bytes_per_sec) = self.tx_rate_bytes_per_sec {
+            std::thread::spawn(move || self.run(r, tx_rate_bytes_per_sec));
         } else {
-            std::thread::spawn(move || self.run(r));
+            std::thread::spawn(move || self.run_no_pacing(r));
         }
         Ok(s)
     }
@@ -153,10 +148,13 @@ impl OutputPort {
         }
     }
 
-    fn run(self, r: flume::Receiver<Pkt>) -> Result<(), Report> {
+    fn run(self, r: flume::Receiver<Pkt>, tx_rate_bytes_per_sec: usize) -> Result<(), Report> {
         // ticker
+        // the bound here does not particularly matter. if we reach it, we will accumulate tokens
+        // in token_bytes and tick over bigger token "blocks" in the next send.  it is the
+        // receiver's responsibility to not have a quiet period cause a massive burst of packets.
         let (ticker_s, ticker_r) = flume::bounded(32);
-        let tx_rate_bytes_per_usec = self.tx_rate_bytes_per_sec as f64 / 1e6;
+        let tx_rate_bytes_per_usec = tx_rate_bytes_per_sec as f64 / 1e6;
         info!(?tx_rate_bytes_per_usec, "pacing");
         std::thread::spawn(move || {
             // try to send tokens for ~ 1500 bytes at a time.
@@ -167,7 +165,8 @@ impl OutputPort {
                 while token_bytes < 1500 {
                     // yield rather than sleep to prevent long sleeps.
                     // might need to replace yield_now with cpu_relax.
-                    std::thread::yield_now();
+                    //std::thread::yield_now();
+                    std::thread::sleep(std::time::Duration::from_micros(10));
                     let dur_us = clk.delta(then, clk.end()).as_micros() as f64;
                     then = clk.raw();
                     token_bytes += (dur_us * tx_rate_bytes_per_usec) as usize;
@@ -183,21 +182,21 @@ impl OutputPort {
         let mut achieved_tx_rate: Option<Rate> = None;
         let clk = quanta::Clock::new();
         // both branches of the select can't happen at the same time, but the borrow checker
-        // doesn't know that, and makes a fuss about queue2 being mutably borrowed twice.
+        // doesn't know that, and makes a fuss about queue being mutably borrowed twice.
         // So we are going to use RefCell.
-        let queue2 = std::cell::RefCell::new(self.queue);
+        let queue = std::cell::RefCell::new(self.queue);
         loop {
             flume::select::Selector::new()
                 .recv(&r, |p| {
-                    let mut q = queue2.try_borrow_mut().unwrap();
+                    let mut q = queue.try_borrow_mut().unwrap();
                     match q.enq(p.unwrap()) {
                     Ok(_) => {}
                     Err(e) => {
-                        debug!(?e, "enq error");
+                        debug!(err=%format!("{:#?}", e), "enq error");
                     }
                 }})
                 .recv(&ticker_r, |bytes| {
-                    let mut q = queue2.try_borrow_mut().unwrap();
+                    let mut q = queue.try_borrow_mut().unwrap();
                     accum_tokens += bytes.unwrap() as isize;
                     while accum_tokens > 0 {
                         match q.deq() {
@@ -211,6 +210,9 @@ impl OutputPort {
                                     }
                                 }
 
+                                // we're not active right now, so we get rid of any token backlog
+                                // to avoid bursting. Once packets come back, we will resume
+                                // building up a backlog.
                                 achieved_tx_rate = None;
                                 accum_tokens = 0;
                             }
@@ -276,8 +278,8 @@ fn ip_link_up(dev: &str) -> Result<(), Report> {
 fn get_ipv4_hdr<'a>(p: etherparse::PacketHeaders<'a>) -> Result<etherparse::Ipv4Header, Report> {
     match p.ip.ok_or_else(|| eyre!("no ip header"))? {
         etherparse::IpHeader::Version4(ipv4, _) => Ok(ipv4),
-        _ => {
-            bail!("only ipv4 supported");
+        x => {
+            bail!("got {:?}", x);
         }
     }
 }
