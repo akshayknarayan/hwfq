@@ -99,7 +99,7 @@ impl OutputPort {
     }
 
     fn start(self) -> Result<flume::Sender<Pkt>, Report> {
-        let (s, r) = flume::bounded(128);
+        let (s, r) = flume::unbounded();
         std::thread::spawn(move || self.run(r));
         Ok(s)
     }
@@ -112,15 +112,12 @@ impl OutputPort {
         // enq
         let q = Arc::clone(&self.queue);
         std::thread::spawn(move || loop {
-            trace!("wait for incoming packet");
             let p = r.recv().unwrap();
-            trace!("got incoming packet");
             match {
                 let mut g = q.lock().unwrap();
                 g.enq(p)
             } {
                 Ok(true) => {
-                    trace!("wake up deq");
                     active_s.try_send(()).unwrap_or(());
                 }
                 Ok(false) => {}
@@ -132,11 +129,18 @@ impl OutputPort {
 
         let clk = quanta::Clock::new();
 
+        struct Rate {
+            epoch_start: u64,
+            bytes: usize,
+        }
+
         // deq
         // we can assume that packets will mostly be ~ the same size.
         let q = self.queue;
         let tx_rate_bytes_per_usec = self.tx_rate_bytes_per_sec as f64 / 1e6;
-        let mut deficit_bytes = 0;
+        info!(?tx_rate_bytes_per_usec, "using pacing rate");
+        let mut deficit_bytes = 15_000;
+        let mut achieved_tx_rate = None;
         loop {
             let p: Pkt = match {
                 let mut g = q.lock().unwrap();
@@ -145,9 +149,12 @@ impl OutputPort {
                 Ok(Some(p)) => p,
                 Ok(None) => {
                     // wait for this queue to become active.
-                    trace!("wait for enq");
                     active_r.recv().unwrap();
-                    trace!("woke up");
+                    achieved_tx_rate = Some(Rate {
+                        epoch_start: clk.raw(),
+                        bytes: 0,
+                    });
+                    deficit_bytes = 15_000;
                     continue;
                 }
                 Err(e) => {
@@ -170,6 +177,30 @@ impl OutputPort {
 
             // now we can send the packet.
             deficit_bytes -= p.buf.len();
+            if let Some(Rate {
+                epoch_start,
+                ref mut bytes,
+            }) = &mut achieved_tx_rate
+            {
+                let el = clk.delta(*epoch_start, clk.raw());
+                if el > std::time::Duration::from_millis(100) {
+                    let epoch_rate_bytes_per_sec = *bytes as f64 / el.as_secs_f64();
+                    let rate_mbps = epoch_rate_bytes_per_sec * 8. / 1e6;
+                    info!(?rate_mbps, ?deficit_bytes, "achieved_tx_rate");
+                    achieved_tx_rate = Some(Rate {
+                        epoch_start: clk.raw(),
+                        bytes: 0,
+                    });
+                } else {
+                    *bytes += p.buf.len();
+                }
+            } else {
+                achieved_tx_rate = Some(Rate {
+                    epoch_start: clk.raw(),
+                    bytes: 0,
+                });
+            }
+
             let Pkt { ip_hdr, mut buf } = p;
             trace!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "forwarding packet");
 
