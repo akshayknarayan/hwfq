@@ -76,6 +76,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Pkt {
     ip_hdr: etherparse::Ipv4Header,
     buf: Vec<u8>,

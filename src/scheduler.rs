@@ -1,5 +1,5 @@
 use super::Pkt;
-use color_eyre::eyre::{ensure, Report};
+use color_eyre::eyre::{bail, ensure, Report};
 use std::collections::VecDeque;
 use tracing::trace;
 
@@ -8,7 +8,7 @@ pub trait Scheduler {
     ///
     /// Return true if the queue was empty before this packet was added, signifying that the
     /// dequeue thread should wake up and start dequeueing packets.
-    fn enq(&mut self, p: Pkt) -> Result<bool, Report>;
+    fn enq(&mut self, p: Pkt) -> Result<(), Report>;
 
     /// Dequeue a packet from the scheduler's queue.
     ///
@@ -34,14 +34,13 @@ impl Fifo {
 }
 
 impl Scheduler for Fifo {
-    fn enq(&mut self, p: Pkt) -> Result<bool, Report> {
-        let now_active = self.inner.is_empty();
+    fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         let new_qsize_bytes = self.cur_qsize_bytes + p.buf.len();
         ensure!(new_qsize_bytes <= self.limit_bytes, "Dropping packet");
         self.cur_qsize_bytes = new_qsize_bytes;
         self.inner.push_back(p);
         trace!(pkts=?self.inner.len(), "queue size");
-        Ok(now_active)
+        Ok(())
     }
 
     fn deq(&mut self) -> Result<Option<Pkt>, Report> {
@@ -73,7 +72,7 @@ impl Drr {
             queues: Default::default(),
             curr_qsizes: [0usize; 8],
             deficits: [0usize; 8],
-            quanta: [1500usize; 8],
+            quanta: [500usize; 8],
             deq_curr_qid: 0,
         }
     }
@@ -93,9 +92,8 @@ fn fnv(src: [u8; 4], dst: [u8; 4], queues: u64) -> u8 {
 }
 
 impl Scheduler for Drr {
-    fn enq(&mut self, p: Pkt) -> Result<bool, Report> {
+    fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         let curr_tot_qsize: usize = self.curr_qsizes.iter().sum();
-        let now_active = curr_tot_qsize == 0;
         ensure!(
             curr_tot_qsize + p.buf.len() <= self.limit_bytes,
             "Dropping packet"
@@ -110,11 +108,15 @@ impl Scheduler for Drr {
         let queue_id = (flow_id % self.queues.len() as u8) as usize;
         self.curr_qsizes[queue_id] += p.buf.len();
         self.queues[queue_id].push_back(p);
-        Ok(now_active)
+        Ok(())
     }
 
     fn deq(&mut self) -> Result<Option<Pkt>, Report> {
-        let start_qid = self.deq_curr_qid;
+        let curr_tot_qsize: usize = self.curr_qsizes.iter().sum();
+        if curr_tot_qsize == 0 {
+            return Ok(None);
+        }
+
         loop {
             if !self.queues[self.deq_curr_qid].is_empty() {
                 // see if there are any packets big enough to fit the accrued deficit.
@@ -133,7 +135,7 @@ impl Scheduler for Drr {
                     return Ok(Some(p));
                 }
 
-                // increment the quanta.
+                // increment the deficit.
                 // CAREFUL: this must come *after* the check above, otherwise we will only service
                 // one queue by giving it deficit increments right before we try to send on it.
                 // This is the opposite of the algorithm on wikipedia
@@ -143,11 +145,486 @@ impl Scheduler for Drr {
             }
 
             self.deq_curr_qid = (self.deq_curr_qid + 1) % self.queues.len();
-            // if we went through all the queues without returning, then we say there are no
-            // packets.
-            if self.deq_curr_qid == start_qid {
-                return Ok(None);
+        }
+    }
+}
+
+pub enum FlowTree {
+    Leaf {
+        deficit: usize,
+        quanta: usize,
+        curr_qlen: usize,
+        queue: VecDeque<Pkt>,
+    },
+    NonLeaf {
+        // a netmask to classify enqueues into children. if src_ip | classify[i] == classify[i], we
+        // enq into children[i].
+        classify: [u32; 4],
+
+        deficit: usize,
+        quanta: usize,
+        curr_qlen: usize,
+
+        curr_child: usize,
+        // in theory the child list could be bigger (linked list), but meh, we are not going to test any topologies with
+        // tree width > 4.
+        children: [Box<FlowTree>; 4],
+    },
+}
+
+impl std::fmt::Debug for FlowTree {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        match self {
+            &FlowTree::Leaf {
+                quanta, ref queue, ..
+            } => f
+                .debug_struct("FlowTree::Leaf")
+                .field("quanta", &quanta)
+                .field("queue_len", &queue.len())
+                .finish_non_exhaustive(),
+
+            &FlowTree::NonLeaf {
+                quanta,
+                classify,
+                ref children,
+                ..
+            } => f
+                .debug_struct("FlowTree::NonLeaf")
+                .field("quanta", &quanta)
+                .field("child0", &(u32::to_be_bytes(classify[0]), &children[0]))
+                .field("child1", &(u32::to_be_bytes(classify[1]), &children[1]))
+                .field("child2", &(u32::to_be_bytes(classify[2]), &children[2]))
+                .field("child3", &(u32::to_be_bytes(classify[3]), &children[3]))
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl FlowTree {
+    fn tot_qlen(&self) -> usize {
+        match self {
+            &FlowTree::NonLeaf { curr_qlen, .. } | &FlowTree::Leaf { curr_qlen, .. } => curr_qlen,
+        }
+    }
+
+    fn enqueue(&mut self, p: Pkt) {
+        match self {
+            &mut FlowTree::Leaf {
+                ref mut queue,
+                ref mut curr_qlen,
+                ..
+            } => {
+                *curr_qlen += p.buf.len();
+                queue.push_back(p);
+            }
+            &mut FlowTree::NonLeaf {
+                ref mut children,
+                classify,
+                ref mut curr_qlen,
+                ..
+            } => {
+                for i in 0..children.len() {
+                    if classify[i] == 0 {
+                        continue;
+                    }
+
+                    if (u32::from_be_bytes(p.ip_hdr.source) | classify[i]) == classify[i] {
+                        *curr_qlen += p.buf.len();
+                        children[i].enqueue(p);
+                        return;
+                    }
+                }
+
+                panic!("Packet did not match any classifications");
             }
         }
+    }
+
+    fn quanta(&self) -> usize {
+        match self {
+            &FlowTree::NonLeaf { quanta, .. } | &FlowTree::Leaf { quanta, .. } => quanta,
+        }
+    }
+
+    fn add_deficit(&mut self, q: usize) {
+        match self {
+            &mut FlowTree::NonLeaf {
+                ref mut deficit, ..
+            }
+            | &mut FlowTree::Leaf {
+                ref mut deficit, ..
+            } => *deficit += q,
+        }
+    }
+
+    fn dequeue(&mut self) -> Option<Pkt> {
+        match self {
+            &mut FlowTree::Leaf {
+                ref mut deficit,
+                ref mut curr_qlen,
+                ref mut queue,
+                ..
+            } => {
+                if !queue.is_empty() {
+                    if *deficit > queue.front().unwrap().buf.len() {
+                        let p = queue.pop_front().unwrap();
+                        if queue.is_empty() {
+                            *deficit = 0;
+                            *curr_qlen = 0;
+                        } else {
+                            *deficit -= p.buf.len();
+                            *curr_qlen -= p.buf.len();
+                        }
+
+                        return Some(p);
+                    }
+                }
+
+                None
+            }
+            &mut FlowTree::NonLeaf {
+                ref mut deficit,
+                ref mut curr_qlen,
+                ref mut curr_child,
+                ref mut children,
+                ..
+            } => {
+                if *curr_qlen == 0 {
+                    return None;
+                }
+
+                loop {
+                    if children[*curr_child].tot_qlen() > 0 {
+                        // is our sub-leaf currently dequeueing packets that fit within credits we already gave it?
+                        if let Some(p) = children[*curr_child].dequeue() {
+                            *curr_qlen -= p.buf.len();
+                            return Some(p);
+                        }
+
+                        // the child doesn't have enough deficit.
+                        if *deficit > 0 {
+                            // how much of our current deficit should we give? it is min(our
+                            // current deficit, child's quanta). our current deficit because we
+                            // cannot give more than we have, and child's quanta because that is
+                            // how the weights happen.
+                            let q = std::cmp::min(*deficit, children[*curr_child].quanta());
+                            *deficit -= q;
+                            children[*curr_child].add_deficit(q);
+                        } else {
+                            // we don't have any deficit to give. ask for more.
+                            return None;
+                        }
+                    }
+
+                    *curr_child = (*curr_child + 1) % children.len();
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum WeightTree {
+    Leaf {
+        weight: usize,
+    },
+    NonLeaf {
+        weight: usize,
+        netmasks: [u32; 4],
+        children: [Option<Box<WeightTree>>; 4],
+    },
+}
+
+impl WeightTree {
+    pub fn leaf(weight: usize) -> Self {
+        WeightTree::Leaf { weight }
+    }
+
+    pub fn parent(weight: usize) -> Self {
+        WeightTree::NonLeaf {
+            weight,
+            netmasks: [0u32; 4],
+            children: [None, None, None, None],
+        }
+    }
+
+    pub fn add_child(mut self, netmask: u32, child: Self) -> Result<Self, Report> {
+        match &mut self {
+            WeightTree::Leaf { .. } => bail!("Cannot add child to leaf"),
+            &mut WeightTree::NonLeaf {
+                ref mut netmasks,
+                ref mut children,
+                ..
+            } => {
+                for c in 0..4 {
+                    if netmasks[c] == 0 {
+                        netmasks[c] = netmask;
+                        children[c] = Some(Box::new(child));
+                        break;
+                    }
+                }
+
+                Ok(self)
+            }
+        }
+    }
+
+    fn get_min_quantum(&self) -> usize {
+        match self {
+            WeightTree::Leaf { weight } => *weight,
+            WeightTree::NonLeaf {
+                weight, children, ..
+            } => {
+                fn lcm(a: usize, b: usize) -> usize {
+                    fn gcd(mut a: usize, mut b: usize) -> usize {
+                        while b > 0 {
+                            let t = b;
+                            b = a % b;
+                            a = t;
+                        }
+
+                        return a;
+                    }
+
+                    (a / gcd(a, b)) * b
+                }
+
+                let sum_children = children
+                    .iter()
+                    .filter_map(|c| c.as_ref())
+                    .map(|c| c.get_min_quantum())
+                    .sum();
+                lcm(*weight, sum_children)
+            }
+        }
+    }
+
+    fn weight(&self) -> usize {
+        match self {
+            WeightTree::NonLeaf { weight, .. } | WeightTree::Leaf { weight } => *weight,
+        }
+    }
+
+    // transform this weight tree with weights into a flow tree with quanta.
+    // this allocates quanta to children satisfying the following:
+    // quantum = sum(child.quantum / child.weight)
+    fn into_flow_tree(self) -> Result<FlowTree, Report> {
+        let mut min_quantum = self.get_min_quantum();
+        if min_quantum < 1500 {
+            min_quantum *= 1500 / min_quantum;
+        }
+
+        self.into_flow_tree_with_quantum(min_quantum)
+    }
+
+    fn into_flow_tree_with_quantum(self, quantum: usize) -> Result<FlowTree, Report> {
+        Ok(match self {
+            WeightTree::Leaf { .. } => FlowTree::Leaf {
+                quanta: quantum,
+                deficit: 0,
+                curr_qlen: 0,
+                queue: Default::default(),
+            },
+            WeightTree::NonLeaf {
+                netmasks,
+                mut children,
+                ..
+            } => {
+                let sum_weights: usize = children
+                    .iter()
+                    .filter_map(|c| c.as_ref())
+                    .map(|c| c.weight())
+                    .sum();
+                ensure!(sum_weights > 0, "no children for non-leaf node");
+
+                let child = |ch: Option<Box<WeightTree>>| {
+                    if let Some(c) = ch {
+                        let wt = c.weight();
+                        Ok::<_, Report>(Box::new(
+                            c.into_flow_tree_with_quantum((wt * quantum) / sum_weights)?,
+                        ))
+                    } else {
+                        Ok(Box::new(FlowTree::Leaf {
+                            quanta: 0,
+                            deficit: 0,
+                            curr_qlen: 0,
+                            queue: Default::default(),
+                        }))
+                    }
+                };
+
+                FlowTree::NonLeaf {
+                    quanta: quantum,
+                    classify: netmasks,
+                    deficit: 0,
+                    curr_qlen: 0,
+                    curr_child: 0,
+                    children: [
+                        child(children[0].take())?,
+                        child(children[1].take())?,
+                        child(children[2].take())?,
+                        child(children[3].take())?,
+                    ],
+                }
+            }
+        })
+    }
+}
+
+pub struct HierarchicalDeficitWeightedRoundRobin {
+    limit_bytes: usize,
+    tree: FlowTree,
+}
+
+impl HierarchicalDeficitWeightedRoundRobin {
+    pub fn new(limit_bytes: usize, weight_tree: WeightTree) -> Result<Self, Report> {
+        Ok(Self {
+            limit_bytes,
+            tree: weight_tree.into_flow_tree()?,
+        })
+    }
+}
+
+impl Scheduler for HierarchicalDeficitWeightedRoundRobin {
+    fn enq(&mut self, p: Pkt) -> Result<(), Report> {
+        let pkt_len = p.buf.len();
+        ensure!(
+            self.tree.tot_qlen() + pkt_len <= self.limit_bytes,
+            "Dropping packet"
+        );
+
+        self.tree.enqueue(p);
+        Ok(())
+    }
+
+    fn deq(&mut self) -> Result<Option<Pkt>, Report> {
+        if self.tree.tot_qlen() == 0 {
+            return Ok(None);
+        }
+
+        // we know there is something to dequeue.
+        // so we must continue adding deficit until something dequeues.
+        loop {
+            if let Some(p) = self.tree.dequeue() {
+                return Ok(Some(p));
+            }
+
+            self.tree.add_deficit(self.tree.quanta());
+        }
+    }
+}
+
+#[cfg(test)]
+mod t {
+    use super::{Scheduler, WeightTree};
+    use crate::Pkt;
+
+    #[test]
+    fn weight_tree() {
+        let wt = WeightTree::parent(1)
+            .add_child(u32::from_be_bytes([42, 1, 0, 255]), WeightTree::leaf(1))
+            .unwrap()
+            .add_child(u32::from_be_bytes([42, 1, 1, 255]), WeightTree::leaf(2))
+            .unwrap();
+        dbg!(&wt);
+
+        let ft = wt.into_flow_tree().unwrap();
+        dbg!(ft);
+
+        let wt = WeightTree::parent(1)
+            .add_child(u32::from_be_bytes([42, 1, 0, 255]), WeightTree::leaf(1))
+            .unwrap()
+            .add_child(u32::from_be_bytes([42, 1, 1, 255]), WeightTree::parent(2))
+            .unwrap();
+        dbg!(&wt);
+
+        wt.into_flow_tree().unwrap_err();
+    }
+
+    #[test]
+    fn hwfq() {
+        let wt = WeightTree::parent(1)
+            .add_child(u32::from_be_bytes([42, 0, 0, 255]), WeightTree::leaf(1)) // "B"
+            .unwrap()
+            .add_child(
+                u32::from_be_bytes([42, 1, 255, 255]),
+                WeightTree::parent(2)
+                    .add_child(u32::from_be_bytes([42, 1, 1, 255]), WeightTree::leaf(1)) // "D"
+                    .unwrap()
+                    .add_child(u32::from_be_bytes([42, 1, 2, 255]), WeightTree::leaf(2)) // "E"
+                    .unwrap(),
+            )
+            .unwrap();
+
+        //dbg!(wt.clone().into_flow_tree().unwrap());
+        let mut hwfq = super::HierarchicalDeficitWeightedRoundRobin::new(
+            150_000, /* 100 x 1500 bytes */
+            wt,
+        )
+        .unwrap();
+
+        let b_ip = [42, 0, 0, 0];
+        let d_ip = [42, 1, 1, 0];
+        let e_ip = [42, 1, 2, 0];
+        let dst_ip = [42, 2, 0, 0];
+
+        assert_eq!(hwfq.tree.tot_qlen(), 0, "");
+        // enqueue a bunch of packets
+        for _ in 0..100 {
+            hwfq.enq(Pkt {
+                ip_hdr: etherparse::Ipv4Header::new(
+                    100,
+                    64,
+                    etherparse::IpNumber::Tcp,
+                    b_ip,
+                    dst_ip,
+                ),
+                buf: vec![0u8; 100],
+            })
+            .unwrap();
+            hwfq.enq(Pkt {
+                ip_hdr: etherparse::Ipv4Header::new(
+                    100,
+                    64,
+                    etherparse::IpNumber::Tcp,
+                    d_ip,
+                    dst_ip,
+                ),
+                buf: vec![0u8; 100],
+            })
+            .unwrap();
+            hwfq.enq(Pkt {
+                ip_hdr: etherparse::Ipv4Header::new(
+                    100,
+                    64,
+                    etherparse::IpNumber::Tcp,
+                    e_ip,
+                    dst_ip,
+                ),
+                buf: vec![0u8; 100],
+            })
+            .unwrap();
+        }
+
+        assert_eq!(hwfq.tree.tot_qlen(), 300 * 100, "");
+
+        let mut b_cnt = 0;
+        let mut d_cnt = 0;
+        let mut e_cnt = 0;
+        for _ in 0..45 {
+            let p = hwfq.deq().unwrap().unwrap();
+            if p.ip_hdr.source == b_ip {
+                b_cnt += 1;
+            } else if p.ip_hdr.source == d_ip {
+                d_cnt += 1;
+            } else if p.ip_hdr.source == e_ip {
+                e_cnt += 1;
+            } else {
+                panic!("unknown ip");
+            }
+        }
+
+        // should be d + e ~= 2 * b, e ~= 2 * d
+        dbg!(b_cnt, d_cnt, e_cnt);
     }
 }
