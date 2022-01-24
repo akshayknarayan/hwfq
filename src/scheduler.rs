@@ -188,14 +188,19 @@ impl std::fmt::Debug for FlowTree {
                 classify,
                 ref children,
                 ..
-            } => f
-                .debug_struct("FlowTree::NonLeaf")
-                .field("quanta", &quanta)
-                .field("child0", &(u32::to_be_bytes(classify[0]), &children[0]))
-                .field("child1", &(u32::to_be_bytes(classify[1]), &children[1]))
-                .field("child2", &(u32::to_be_bytes(classify[2]), &children[2]))
-                .field("child3", &(u32::to_be_bytes(classify[3]), &children[3]))
-                .finish_non_exhaustive(),
+            } => {
+                let mut s = f.debug_struct("FlowTree::NonLeaf");
+                s.field("quanta", &quanta)
+                    .field("child0", &(u32::to_be_bytes(classify[0]), &children[0]));
+
+                for i in 1..=3 {
+                    if classify[i] > 0 {
+                        s.field("child", &(u32::to_be_bytes(classify[i]), &children[i]));
+                    }
+                }
+
+                s.finish()
+            }
         }
     }
 }
@@ -308,6 +313,23 @@ impl FlowTree {
                             // cannot give more than we have, and child's quanta because that is
                             // how the weights happen.
                             let q = std::cmp::min(*deficit, children[*curr_child].quanta());
+                            // while the above is true, we should *not* end up in a situation where
+                            // the child's quanta is x, but we only have deficit < x left to give
+                            // it. This is because giving child.quanta of deficit at a time is
+                            // important to ensuring that the weights are maintained properly.
+                            // Thankfully, we know that `self.quanta` has been set according to the
+                            // `WeightTree::get_min_quantum()` rule. If (recursively), `self.deficit` will only ever
+                            // be incremented by `self.quanta`, then `self.deficit` will always be
+                            // a multiple of sum(child.weight). Since we iterate through children
+                            // in this loop (`curr_child = curr_child + 1 % children.len()` below)
+                            // and never go backwards, each iteration of this loop will remove exactly 1 `self.quanta` from
+                            // deficit. So, `deficit` will never be < `child.quanta`.
+                            assert_eq!(
+                                q,
+                                children[*curr_child].quanta(),
+                                "invariant failed, see note in src"
+                            );
+
                             *deficit -= q;
                             children[*curr_child].add_deficit(q);
                         } else {
@@ -468,32 +490,21 @@ impl WeightTree {
         }
     }
 
-    fn get_min_quantum(&self) -> usize {
+    fn get_min_quantum(&self) -> Result<usize, Report> {
         match self {
-            WeightTree::Leaf { weight } => *weight,
-            WeightTree::NonLeaf {
-                weight, children, ..
-            } => {
-                fn lcm(a: usize, b: usize) -> usize {
-                    fn gcd(mut a: usize, mut b: usize) -> usize {
-                        while b > 0 {
-                            let t = b;
-                            b = a % b;
-                            a = t;
-                        }
-
-                        return a;
-                    }
-
-                    (a / gcd(a, b)) * b
-                }
-
-                let sum_children = children
+            WeightTree::Leaf { weight } => Ok(*weight),
+            WeightTree::NonLeaf { children, .. } => {
+                let (children_min_quanta, children_weights): (Vec<_>, Vec<_>) = children
                     .iter()
                     .filter_map(|c| c.as_ref())
-                    .map(|c| c.get_min_quantum())
-                    .sum();
-                lcm(*weight, sum_children)
+                    .map(|c| (c.get_min_quantum(), c.weight()))
+                    .unzip();
+                let weight_sum: usize = children_weights.into_iter().sum();
+                ensure!(weight_sum > 0, "NonLeaf node must have children");
+                let children_min_quanta_ok: Result<Vec<_>, _> =
+                    children_min_quanta.into_iter().collect();
+                let max_min_quanta = children_min_quanta_ok?.into_iter().max().unwrap();
+                Ok(max_min_quanta * weight_sum)
             }
         }
     }
@@ -508,7 +519,7 @@ impl WeightTree {
     // this allocates quanta to children satisfying the following:
     // quantum = sum(child.quantum / child.weight)
     fn into_flow_tree(self) -> Result<FlowTree, Report> {
-        let mut min_quantum = self.get_min_quantum();
+        let mut min_quantum = self.get_min_quantum()?;
         if min_quantum < 1500 {
             min_quantum *= 1500 / min_quantum;
         }
@@ -552,18 +563,25 @@ impl WeightTree {
                     }
                 };
 
+                let children = [
+                    child(children[0].take())?,
+                    child(children[1].take())?,
+                    child(children[2].take())?,
+                    child(children[3].take())?,
+                ];
+
+                let sum_child_quanta: usize = children.iter().map(|c| c.quanta()).sum();
+                assert_eq!(
+                    sum_child_quanta, quantum,
+                    "quantum did not divide evenly among children"
+                );
                 FlowTree::NonLeaf {
                     quanta: quantum,
                     classify: netmasks,
                     deficit: 0,
                     curr_qlen: 0,
                     curr_child: 0,
-                    children: [
-                        child(children[0].take())?,
-                        child(children[1].take())?,
-                        child(children[2].take())?,
-                        child(children[3].take())?,
-                    ],
+                    children,
                 }
             }
         })
@@ -655,7 +673,8 @@ mod t {
             )
             .unwrap();
 
-        //dbg!(wt.clone().into_flow_tree().unwrap());
+        dbg!(wt.get_min_quantum().unwrap());
+        dbg!(wt.clone().into_flow_tree().unwrap());
         let mut hwfq = super::HierarchicalDeficitWeightedRoundRobin::new(
             150_000, /* 100 x 1500 bytes */
             wt,
