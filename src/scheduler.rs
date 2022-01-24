@@ -1,5 +1,5 @@
 use super::Pkt;
-use color_eyre::eyre::{bail, ensure, Report};
+use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
 use std::collections::VecDeque;
 use tracing::trace;
 
@@ -335,7 +335,106 @@ pub enum WeightTree {
     },
 }
 
+fn parse_netmask(prefix_notation: &str) -> Result<u32, Report> {
+    let slash = prefix_notation
+        .find('/')
+        .ok_or_else(|| eyre!("prefix must be of form a.b.c.d/e"))?;
+    let (ip, pfx) = prefix_notation.split_at(slash);
+    let ip: Vec<_> = ip.split('.').collect();
+    let pfx: u8 = pfx[1..]
+        .parse()
+        .wrap_err(eyre!("prefix {:?} not parsed", pfx))?;
+    ensure!(pfx <= 32, "Prefix must be 0-32");
+    ensure!(ip.len() == 4, "ip must be a.b.c.d");
+    let (a, b, c, d) = match &ip[..] {
+        &[a, b, c, d] => (a.parse()?, b.parse()?, c.parse()?, d.parse()?),
+        _ => unreachable!(),
+    };
+
+    let ip = u32::from_be_bytes([a, b, c, d]);
+    let mask = (1 << (32 - pfx)) - 1;
+    Ok(ip | mask)
+}
+
+use yaml_rust::Yaml;
+fn from_yaml(yaml: Yaml) -> Result<(u32, WeightTree), Report> {
+    let mut node = yaml
+        .into_hash()
+        .ok_or_else(|| eyre!("Node must be dictionary"))?;
+    let netmask = node
+        .remove(&Yaml::String("prefix".to_owned()))
+        .ok_or_else(|| eyre!("Need prefix key"))?
+        .into_string()
+        .ok_or_else(|| eyre!("Prefix must be string"))?;
+    let netmask =
+        parse_netmask(&netmask).wrap_err(eyre!("Parsing prefix notation {:?}", &netmask))?;
+    let weight = node
+        .remove(&Yaml::String("weight".to_owned()))
+        .ok_or_else(|| eyre!("Need weight key"))?
+        .into_i64()
+        .ok_or_else(|| eyre!("Weight must be uint"))? as usize;
+    if let Some(children) = node.remove(&Yaml::String("children".to_owned())) {
+        Ok((
+            netmask,
+            children
+                .into_iter()
+                .try_fold(WeightTree::parent(weight), |parent, child| {
+                    let (netmask, child_node) = from_yaml(child)?;
+                    parent.add_child(netmask, child_node)
+                })?,
+        ))
+    } else {
+        Ok((netmask, WeightTree::leaf(weight)))
+    }
+}
+
 impl WeightTree {
+    /// Load `WeightTree` from yaml config file.
+    ///
+    /// # Example
+    /// ```yaml
+    /// root:
+    ///   - h0:
+    ///     prefix: "1.3.0.0/16"
+    ///     weight: 1
+    ///   - h1:
+    ///     prefix: "1.2.0.0/16"
+    ///     weight: 2
+    ///     children:
+    ///       - h3:
+    ///         prefix: "1.2.3.0/24"
+    ///         weight: 1
+    ///       - h4:
+    ///         prefix: "1.2.4.0/24"
+    ///         weight: 2
+    /// ```
+    pub fn from_file(file: impl AsRef<std::path::Path>) -> Result<Self, Report> {
+        let cfg_str = std::fs::read_to_string(file)?;
+        Self::from_str(&cfg_str)
+    }
+
+    pub fn from_str(cfg: &str) -> Result<Self, Report> {
+        let yaml = yaml_rust::YamlLoader::load_from_str(cfg)?;
+        ensure!(yaml.len() == 1, "Tree cfg needs exactly one element");
+        let children = yaml
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_hash()
+            .ok_or_else(|| eyre!("Need dictionary structure"))?
+            .remove(&Yaml::String("root".to_owned()))
+            .ok_or_else(|| eyre!("Toplevel key must be `root`"))?
+            .into_vec()
+            .ok_or_else(|| eyre!("Toplevel value must be list of child nodes"))?;
+
+        children
+            .into_iter()
+            .try_fold(Self::parent(1), |parent, child| {
+                let (netmask, child_node) = from_yaml(child)?;
+                parent.add_child(netmask, child_node)
+            })
+    }
+
     pub fn leaf(weight: usize) -> Self {
         WeightTree::Leaf { weight }
     }
@@ -626,5 +725,70 @@ mod t {
 
         // should be d + e ~= 2 * b, e ~= 2 * d
         dbg!(b_cnt, d_cnt, e_cnt);
+    }
+
+    #[test]
+    fn parse_netmask() {
+        let p = "42.1.2.15/24";
+        let m = super::parse_netmask(&p).unwrap();
+        assert_eq!(m, u32::from_be_bytes([42, 1, 2, 255]));
+
+        let p = "1.1.1.1/16";
+        let m = super::parse_netmask(&p).unwrap();
+        assert_eq!(m, u32::from_be_bytes([1, 1, 255, 255]));
+
+        let p = "1.1.1.1/33";
+        super::parse_netmask(&p).unwrap_err();
+    }
+
+    #[test]
+    fn parse_yaml() {
+        let cfg_str = "\
+root:
+  - h0:
+    prefix: \"42.0.0.0/16\"
+    weight: 1
+  - h1:
+    prefix: \"42.1.0.0/16\"
+    weight: 2
+    children:
+      - h3:
+        prefix: \"42.1.3.0/24\"
+        weight: 1
+      - h4:
+        prefix: \"42.1.4.0/24\"
+        weight: 2
+        ";
+
+        let wt = WeightTree::from_str(cfg_str).unwrap();
+        dbg!(&wt);
+        assert!(
+            matches!(
+                wt,
+                WeightTree::NonLeaf {
+                    weight: 1,
+                    netmasks: [0x2a00ffff, 0x2a01ffff, 0, 0],
+                    children: [
+                        Some(l1 ),
+                        Some(l2 ),
+                        None,
+                        None,
+                    ],
+                } if matches!(&*l1, &WeightTree::Leaf { weight: 1 }) &&
+                     matches!(&*l2, &WeightTree::NonLeaf {
+                            weight: 2,
+                            netmasks: [0x2a0103ff, 0x2a0104ff, 0, 0],
+                            children: [
+                                Some(ref l3 ),
+                                Some(ref l4 ),
+                                None,
+                                None
+                            ],
+                    } if matches!(&**l3, WeightTree::Leaf { weight: 1 }) &&
+                         matches!(&**l4, WeightTree::Leaf { weight: 2 })
+                    )
+            ),
+            "wrong weighttree"
+        );
     }
 }

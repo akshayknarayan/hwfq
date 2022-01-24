@@ -2,7 +2,7 @@ use color_eyre::{
     eyre::{eyre, Report},
     Help,
 };
-use hwfq::scheduler::{Drr, Fifo};
+use hwfq::scheduler::{Drr, Fifo, HierarchicalDeficitWeightedRoundRobin, WeightTree};
 use hwfq::Datapath;
 use structopt::StructOpt;
 
@@ -20,6 +20,9 @@ struct Opt {
 
     #[structopt(short, long)]
     scheduler: String,
+
+    #[structopt(short, long, required_if(scheduler, "hwfq"))]
+    weights_cfg: Option<std::path::PathBuf>,
 }
 
 pub fn main() -> Result<(), Report> {
@@ -55,6 +58,20 @@ pub fn main() -> Result<(), Report> {
                 Drr::new(opt.queue_size_bytes),
             )
             .unwrap();
+            s.run().unwrap();
+        }
+        "hwfq" => {
+            let cfg = opt.weights_cfg.unwrap();
+            let wt = WeightTree::from_file(&cfg);
+            let hwfq = HierarchicalDeficitWeightedRoundRobin::new(opt.queue_size_bytes, wt)?;
+            let s = Datapath::new(
+                opt.interface_name,
+                Some(
+                    opt.rate_bytes_per_sec
+                        .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
+                ),
+                hwfq,
+            )?;
             s.run().unwrap();
         }
         s => {
