@@ -21,7 +21,7 @@ struct Opt {
     #[structopt(short, long)]
     scheduler: String,
 
-    #[structopt(short, long, required_if(scheduler, "hwfq"))]
+    #[structopt(short, long, required_if("scheduler", "hwfq"))]
     weights_cfg: Option<std::path::PathBuf>,
 }
 
@@ -63,7 +63,7 @@ pub fn main() -> Result<(), Report> {
         "hwfq" => {
             let cfg = opt.weights_cfg.unwrap();
             let wt = WeightTree::from_file(&cfg);
-            let hwfq = HierarchicalDeficitWeightedRoundRobin::new(opt.queue_size_bytes, wt)?;
+            let hwfq = HierarchicalDeficitWeightedRoundRobin::new(opt.queue_size_bytes, wt?)?;
             let s = Datapath::new(
                 opt.interface_name,
                 Some(
