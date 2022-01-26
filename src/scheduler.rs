@@ -169,6 +169,7 @@ pub enum FlowTree {
         // in theory the child list could be bigger (linked list), but meh, we are not going to test any topologies with
         // tree width > 4.
         children: [Box<FlowTree>; 4],
+        children_remaining_quanta: [usize; 4],
     },
 }
 
@@ -271,7 +272,7 @@ impl FlowTree {
                 ..
             } => {
                 if !queue.is_empty() {
-                    if *deficit > queue.front().unwrap().buf.len() {
+                    if *deficit >= queue.front().unwrap().buf.len() {
                         let p = queue.pop_front().unwrap();
                         if queue.is_empty() {
                             *deficit = 0;
@@ -291,6 +292,7 @@ impl FlowTree {
                 ref mut deficit,
                 ref mut curr_qlen,
                 ref mut curr_child,
+                ref mut children_remaining_quanta,
                 ref mut children,
                 ..
             } => {
@@ -312,23 +314,15 @@ impl FlowTree {
                             // current deficit, child's quanta). our current deficit because we
                             // cannot give more than we have, and child's quanta because that is
                             // how the weights happen.
-                            let q = std::cmp::min(*deficit, children[*curr_child].quanta());
-                            // while the above is true, we should *not* end up in a situation where
-                            // the child's quanta is x, but we only have deficit < x left to give
-                            // it. This is because giving child.quanta of deficit at a time is
-                            // important to ensuring that the weights are maintained properly.
-                            // Thankfully, we know that `self.quanta` has been set according to the
-                            // `WeightTree::get_min_quantum()` rule. If (recursively), `self.deficit` will only ever
-                            // be incremented by `self.quanta`, then `self.deficit` will always be
-                            // a multiple of sum(child.weight). Since we iterate through children
-                            // in this loop (`curr_child = curr_child + 1 % children.len()` below)
-                            // and never go backwards, each iteration of this loop will remove exactly 1 `self.quanta` from
-                            // deficit. So, `deficit` will never be < `child.quanta`.
-                            assert_eq!(
-                                q,
-                                children[*curr_child].quanta(),
-                                "invariant failed, see note in src"
-                            );
+                            let ask = children[*curr_child].quanta()
+                                + children_remaining_quanta[*curr_child];
+                            let q = std::cmp::min(*deficit, ask);
+
+                            if q == *deficit {
+                                children_remaining_quanta[*curr_child] = ask - q;
+                            } else {
+                                children_remaining_quanta[*curr_child] = 0;
+                            }
 
                             *deficit -= q;
                             children[*curr_child].add_deficit(q);
@@ -520,8 +514,8 @@ impl WeightTree {
     // quantum = sum(child.quantum / child.weight)
     fn into_flow_tree(self) -> Result<FlowTree, Report> {
         let mut min_quantum = self.get_min_quantum()?;
-        if min_quantum < 1500 {
-            min_quantum *= 1500 / min_quantum;
+        if min_quantum < 500 {
+            min_quantum *= 500 / min_quantum;
         }
 
         self.into_flow_tree_with_quantum(min_quantum)
@@ -582,6 +576,7 @@ impl WeightTree {
                     curr_qlen: 0,
                     curr_child: 0,
                     children,
+                    children_remaining_quanta: [0usize; 4],
                 }
             }
         })
@@ -658,8 +653,7 @@ mod t {
         wt.into_flow_tree().unwrap_err();
     }
 
-    #[test]
-    fn hwfq() {
+    fn make_test_tree() -> super::HierarchicalDeficitWeightedRoundRobin {
         let wt = WeightTree::parent(1)
             .add_child(u32::from_be_bytes([42, 0, 0, 255]), WeightTree::leaf(1)) // "B"
             .unwrap()
@@ -675,12 +669,18 @@ mod t {
 
         dbg!(wt.get_min_quantum().unwrap());
         dbg!(wt.clone().into_flow_tree().unwrap());
-        let mut hwfq = super::HierarchicalDeficitWeightedRoundRobin::new(
+        let hwfq = super::HierarchicalDeficitWeightedRoundRobin::new(
             150_000, /* 100 x 1500 bytes */
             wt,
         )
         .unwrap();
 
+        hwfq
+    }
+
+    #[test]
+    fn hwfq() {
+        let mut hwfq = make_test_tree();
         let b_ip = [42, 0, 0, 0];
         let d_ip = [42, 1, 1, 0];
         let e_ip = [42, 1, 2, 0];
@@ -729,7 +729,7 @@ mod t {
         let mut b_cnt = 0;
         let mut d_cnt = 0;
         let mut e_cnt = 0;
-        for _ in 0..45 {
+        for _ in 0..180 {
             let p = hwfq.deq().unwrap().unwrap();
             if p.ip_hdr.source == b_ip {
                 b_cnt += 1;
@@ -744,6 +744,75 @@ mod t {
 
         // should be d + e ~= 2 * b, e ~= 2 * d
         dbg!(b_cnt, d_cnt, e_cnt);
+        let sum_d_e = (d_cnt + e_cnt) as isize;
+        let twice_b = (b_cnt * 2) as isize;
+        assert!((sum_d_e - twice_b).abs() < 5);
+        let e = e_cnt as isize;
+        let twice_d = (d_cnt * 2) as isize;
+        assert!((twice_d - e).abs() < 5);
+    }
+
+    #[test]
+    fn hwfq_partially_active() {
+        let mut hwfq = make_test_tree();
+
+        let b_ip = [42, 0, 0, 0];
+        let d_ip = [42, 1, 1, 0];
+        let e_ip = [42, 1, 2, 0];
+        let dst_ip = [42, 2, 0, 0];
+
+        assert_eq!(hwfq.tree.tot_qlen(), 0, "");
+        // enqueue only d and e packets
+        for _ in 0..60 {
+            hwfq.enq(Pkt {
+                ip_hdr: etherparse::Ipv4Header::new(
+                    100,
+                    64,
+                    etherparse::IpNumber::Tcp,
+                    d_ip,
+                    dst_ip,
+                ),
+                buf: vec![0u8; 100],
+            })
+            .unwrap();
+            hwfq.enq(Pkt {
+                ip_hdr: etherparse::Ipv4Header::new(
+                    100,
+                    64,
+                    etherparse::IpNumber::Tcp,
+                    e_ip,
+                    dst_ip,
+                ),
+                buf: vec![0u8; 100],
+            })
+            .unwrap();
+        }
+
+        assert_eq!(hwfq.tree.tot_qlen(), 120 * 100, "");
+
+        let mut b_cnt = 0;
+        let mut d_cnt = 0;
+        let mut e_cnt = 0;
+        for _ in 0..60 {
+            let p = hwfq.deq().unwrap().unwrap();
+            if p.ip_hdr.source == b_ip {
+                b_cnt += 1;
+            } else if p.ip_hdr.source == d_ip {
+                d_cnt += 1;
+            } else if p.ip_hdr.source == e_ip {
+                e_cnt += 1;
+            } else {
+                panic!("unknown ip");
+            }
+        }
+
+        assert_eq!(b_cnt, 0, "should not get b packets");
+
+        // should be e ~= 2 * d
+        dbg!(d_cnt, e_cnt);
+        let e = e_cnt as isize;
+        let twice_d = (d_cnt * 2) as isize;
+        assert!((twice_d - e).abs() < 10);
     }
 
     #[test]
