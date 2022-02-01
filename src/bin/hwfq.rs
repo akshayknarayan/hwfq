@@ -18,6 +18,9 @@ struct Opt {
     #[structopt(short, long)]
     queue_size_bytes: usize,
 
+    #[structopt(long)]
+    receiver_weights: bool,
+
     #[structopt(short, long)]
     scheduler: String,
 
@@ -63,7 +66,11 @@ pub fn main() -> Result<(), Report> {
         "hwfq" => {
             let cfg = opt.weights_cfg.unwrap();
             let wt = WeightTree::from_file(&cfg);
-            let hwfq = HierarchicalDeficitWeightedRoundRobin::new(opt.queue_size_bytes, wt?)?;
+            let hwfq = HierarchicalDeficitWeightedRoundRobin::new(
+                opt.queue_size_bytes,
+                !opt.receiver_weights,
+                wt?,
+            )?;
             let s = Datapath::new(
                 opt.interface_name,
                 Some(

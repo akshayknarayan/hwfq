@@ -157,7 +157,7 @@ pub enum FlowTree {
         queue: VecDeque<Pkt>,
     },
     NonLeaf {
-        // a netmask to classify enqueues into children. if src_ip | classify[i] == classify[i], we
+        // a netmask to classify enqueues into children. if (src_ip or dst_ip) | classify[i] == classify[i], we
         // enq into children[i].
         classify: [u32; 4],
 
@@ -213,7 +213,7 @@ impl FlowTree {
         }
     }
 
-    fn enqueue(&mut self, p: Pkt) {
+    fn enqueue<const USE_SRC_IP: bool>(&mut self, p: Pkt) {
         match self {
             &mut FlowTree::Leaf {
                 ref mut queue,
@@ -234,9 +234,15 @@ impl FlowTree {
                         continue;
                     }
 
-                    if (u32::from_be_bytes(p.ip_hdr.source) | classify[i]) == classify[i] {
+                    let ip = if USE_SRC_IP {
+                        u32::from_be_bytes(p.ip_hdr.source)
+                    } else {
+                        u32::from_be_bytes(p.ip_hdr.destination)
+                    };
+
+                    if (ip | classify[i]) == classify[i] {
                         *curr_qlen += p.buf.len();
-                        children[i].enqueue(p);
+                        children[i].enqueue::<USE_SRC_IP>(p);
                         return;
                     }
                 }
@@ -585,13 +591,19 @@ impl WeightTree {
 
 pub struct HierarchicalDeficitWeightedRoundRobin {
     limit_bytes: usize,
+    lookup_on_src_ip: bool,
     tree: FlowTree,
 }
 
 impl HierarchicalDeficitWeightedRoundRobin {
-    pub fn new(limit_bytes: usize, weight_tree: WeightTree) -> Result<Self, Report> {
+    pub fn new(
+        limit_bytes: usize,
+        lookup_on_src_ip: bool,
+        weight_tree: WeightTree,
+    ) -> Result<Self, Report> {
         Ok(Self {
             limit_bytes,
+            lookup_on_src_ip,
             tree: weight_tree.into_flow_tree()?,
         })
     }
@@ -605,7 +617,11 @@ impl Scheduler for HierarchicalDeficitWeightedRoundRobin {
             "Dropping packet"
         );
 
-        self.tree.enqueue(p);
+        if self.lookup_on_src_ip {
+            self.tree.enqueue::<true>(p);
+        } else {
+            self.tree.enqueue::<false>(p);
+        }
         Ok(())
     }
 
@@ -671,7 +687,7 @@ mod t {
         dbg!(wt.clone().into_flow_tree().unwrap());
         let hwfq = super::HierarchicalDeficitWeightedRoundRobin::new(
             150_000, /* 100 x 1500 bytes */
-            wt,
+            true, wt,
         )
         .unwrap();
 
@@ -878,5 +894,97 @@ root:
             ),
             "wrong weighttree"
         );
+    }
+
+    #[test]
+    fn receive_hwfq() {
+        let wt = WeightTree::parent(1)
+            .add_child(u32::from_be_bytes([42, 0, 0, 255]), WeightTree::leaf(1)) // "B"
+            .unwrap()
+            .add_child(
+                u32::from_be_bytes([42, 1, 255, 255]),
+                WeightTree::parent(2)
+                    .add_child(u32::from_be_bytes([42, 1, 1, 255]), WeightTree::leaf(1)) // "D"
+                    .unwrap()
+                    .add_child(u32::from_be_bytes([42, 1, 2, 255]), WeightTree::leaf(2)) // "E"
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let mut hwfq = super::HierarchicalDeficitWeightedRoundRobin::new(
+            150_000, /* 100 x 1500 bytes */
+            false, wt,
+        )
+        .unwrap();
+
+        let b_ip = [42, 0, 0, 0];
+        let d_ip = [42, 1, 1, 0];
+        let e_ip = [42, 1, 2, 0];
+        let src_ip = [42, 2, 0, 0];
+
+        assert_eq!(hwfq.tree.tot_qlen(), 0, "");
+        // enqueue a bunch of packets
+        for _ in 0..100 {
+            hwfq.enq(Pkt {
+                ip_hdr: etherparse::Ipv4Header::new(
+                    100,
+                    64,
+                    etherparse::IpNumber::Tcp,
+                    src_ip,
+                    b_ip,
+                ),
+                buf: vec![0u8; 100],
+            })
+            .unwrap();
+            hwfq.enq(Pkt {
+                ip_hdr: etherparse::Ipv4Header::new(
+                    100,
+                    64,
+                    etherparse::IpNumber::Tcp,
+                    src_ip,
+                    d_ip,
+                ),
+                buf: vec![0u8; 100],
+            })
+            .unwrap();
+            hwfq.enq(Pkt {
+                ip_hdr: etherparse::Ipv4Header::new(
+                    100,
+                    64,
+                    etherparse::IpNumber::Tcp,
+                    src_ip,
+                    e_ip,
+                ),
+                buf: vec![0u8; 100],
+            })
+            .unwrap();
+        }
+
+        assert_eq!(hwfq.tree.tot_qlen(), 300 * 100, "");
+
+        let mut b_cnt = 0;
+        let mut d_cnt = 0;
+        let mut e_cnt = 0;
+        for _ in 0..180 {
+            let p = hwfq.deq().unwrap().unwrap();
+            if p.ip_hdr.destination == b_ip {
+                b_cnt += 1;
+            } else if p.ip_hdr.destination == d_ip {
+                d_cnt += 1;
+            } else if p.ip_hdr.destination == e_ip {
+                e_cnt += 1;
+            } else {
+                panic!("unknown ip");
+            }
+        }
+
+        // should be d + e ~= 2 * b, e ~= 2 * d
+        dbg!(b_cnt, d_cnt, e_cnt);
+        let sum_d_e = (d_cnt + e_cnt) as isize;
+        let twice_b = (b_cnt * 2) as isize;
+        assert!((sum_d_e - twice_b).abs() < 5);
+        let e = e_cnt as isize;
+        let twice_d = (d_cnt * 2) as isize;
+        assert!((twice_d - e).abs() < 5);
     }
 }
