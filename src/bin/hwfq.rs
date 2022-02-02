@@ -24,6 +24,9 @@ struct Opt {
     #[structopt(short, long)]
     scheduler: String,
 
+    #[structopt(long)]
+    ip: String,
+
     #[structopt(short, long, required_if("scheduler", "hwfq"))]
     weights_cfg: Option<std::path::PathBuf>,
 }
@@ -36,7 +39,7 @@ pub fn main() -> Result<(), Report> {
 
     match opt.scheduler.as_str() {
         "none" => {
-            let s = Datapath::new(opt.interface_name, None, Fifo::new(0)).unwrap();
+            let s = Datapath::new(opt.interface_name, None, Fifo::new(0), opt.ip).unwrap();
             s.run().unwrap();
         }
         "fifo" => {
@@ -46,7 +49,7 @@ pub fn main() -> Result<(), Report> {
                     opt.rate_bytes_per_sec
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
                 ),
-                Fifo::new(opt.queue_size_bytes),
+                Fifo::new(opt.queue_size_bytes), opt.ip
             )
             .unwrap();
             s.run().unwrap();
@@ -58,7 +61,7 @@ pub fn main() -> Result<(), Report> {
                     opt.rate_bytes_per_sec
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
                 ),
-                Drr::new(opt.queue_size_bytes),
+                Drr::new(opt.queue_size_bytes), opt.ip
             )
             .unwrap();
             s.run().unwrap();
@@ -69,7 +72,7 @@ pub fn main() -> Result<(), Report> {
             let hwfq = HierarchicalDeficitWeightedRoundRobin::new(
                 opt.queue_size_bytes,
                 !opt.receiver_weights,
-                wt?,
+                wt?
             )?;
             let s = Datapath::new(
                 opt.interface_name,
@@ -77,7 +80,7 @@ pub fn main() -> Result<(), Report> {
                     opt.rate_bytes_per_sec
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
                 ),
-                hwfq,
+                hwfq, opt.ip
             )?;
             s.run().unwrap();
         }

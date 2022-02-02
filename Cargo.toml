@@ -23,3 +23,7 @@ tracing-subscriber  = { version = "0.3", optional = true }
 [[bin]]
 name = "hwfq"
 required-features = ["bin"]
+
+[[bin]]
+name = "uds_out"
+required-features = ["bin"]

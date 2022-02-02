@@ -247,7 +247,9 @@ impl FlowTree {
                     }
                 }
 
-                panic!("Packet did not match any classifications");
+                // panic!("Packet did not match any classifications: {:#?}", p.ip_hdr);
+                eprintln!("Packet did not match any classifications: {:#?}", p.ip_hdr);
+                return;
             }
         }
     }

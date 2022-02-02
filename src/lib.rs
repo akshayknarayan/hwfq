@@ -19,6 +19,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
         fwd_iface: String,
         tx_rate_bytes_per_sec: Option<usize>,
         sch: S,
+        bind_addr: String,
     ) -> Result<Self, Report> {
         let iface =
             Iface::new("hwfq-%d", tun_tap::Mode::Tun).wrap_err("could not create TUN interface")?;
@@ -26,13 +27,13 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
             iface,
             out_port: OutputPort::new(fwd_iface, tx_rate_bytes_per_sec, sch)?,
         };
-        this.config_ip()?;
+        this.config_ip(&bind_addr)?;
         Ok(this)
     }
 
-    fn config_ip(&self) -> Result<(), Report> {
+    fn config_ip(&self, bind_addr: &str) -> Result<(), Report> {
         let name = self.iface.name();
-        add_ip_addr(name, "100.64.0.1/24")?;
+        add_ip_addr(name, bind_addr)?;
         ip_link_up(name)?;
         Ok(())
     }
@@ -66,7 +67,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
 
             // TODO route to output ports based on ip header?
             // currently we assume only 1.
-            let out_buf = &buf[4..len];
+            let out_buf = &buf[0..len];
             fwd.send(Pkt {
                 ip_hdr,
                 buf: out_buf.to_vec(),
@@ -88,7 +89,7 @@ struct Rate {
 }
 
 struct OutputPort<S> {
-    fwd: ip_socket::IpIfaceSocket,
+    fwd: std::os::unix::net::UnixDatagram,
     tx_rate_bytes_per_sec: Option<usize>,
     queue: S,
 }
@@ -99,7 +100,9 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
         tx_rate_bytes_per_sec: Option<usize>,
         sch: S,
     ) -> Result<Self, Report> {
-        let fwd = ip_socket::IpIfaceSocket::new(out_iface)?;
+        //let fwd = ip_socket::IpIfaceSocket::new(out_iface)?;
+        let fwd = std::os::unix::net::UnixDatagram::unbound().unwrap();
+        fwd.connect(out_iface).unwrap();
         Ok(Self {
             fwd,
             tx_rate_bytes_per_sec,
@@ -122,7 +125,7 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
         let clk = quanta::Clock::new();
         let mut achieved_tx_rate: Option<Rate> = None;
         loop {
-            let Pkt { ip_hdr, mut buf } = r.recv().unwrap();
+            let Pkt { ip_hdr, buf } = r.recv().unwrap();
             match &mut achieved_tx_rate {
                 None => {
                     achieved_tx_rate = Some(Rate {
@@ -143,7 +146,10 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
             }
 
             trace!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "forwarding packet");
-            if let Err(e) = self.fwd.send(&mut buf, ip_hdr) {
+            //if let Err(e) = self.fwd.send(&mut buf, ip_hdr) {
+            //    debug!(?e, "fwd error");
+            //}
+            if let Err(e) = self.fwd.send(&buf) {
                 debug!(?e, "fwd error");
             }
         }
@@ -238,9 +244,12 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
                                 }
 
                                 accum_tokens -= p.buf.len() as isize;
-                                let Pkt { ip_hdr, mut buf } = p;
+                                let Pkt { ip_hdr, buf } = p;
                                 trace!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "forwarding packet");
-                                if let Err(e) = self.fwd.send(&mut buf, ip_hdr) {
+                                //if let Err(e) = self.fwd.send(&mut buf, ip_hdr) {
+                                //    debug!(?e, "fwd error");
+                                //}
+                                if let Err(e) = self.fwd.send(&buf) {
                                     debug!(?e, "fwd error");
                                 }
                             }
@@ -260,6 +269,15 @@ fn parse_and_get_ipv4_dst(buf: &[u8]) -> Result<etherparse::Ipv4Header, Report> 
     Ok(ip_hdr)
 }
 
+fn get_ipv4_hdr<'a>(p: etherparse::PacketHeaders<'a>) -> Result<etherparse::Ipv4Header, Report> {
+    match p.ip.ok_or_else(|| eyre!("no ip header"))? {
+        etherparse::IpHeader::Version4(ipv4, _) => Ok(ipv4),
+        x => {
+            bail!("got {:?}", x);
+        }
+    }
+}
+
 fn add_ip_addr(dev: &str, ip_with_prefix: &str) -> Result<(), Report> {
     let status = Command::new("ip")
         .args(["addr", "add", "dev", dev, ip_with_prefix])
@@ -274,13 +292,4 @@ fn ip_link_up(dev: &str) -> Result<(), Report> {
         .status()?;
     ensure!(status.success(), "ip addr add failed");
     Ok(())
-}
-
-fn get_ipv4_hdr<'a>(p: etherparse::PacketHeaders<'a>) -> Result<etherparse::Ipv4Header, Report> {
-    match p.ip.ok_or_else(|| eyre!("no ip header"))? {
-        etherparse::IpHeader::Version4(ipv4, _) => Ok(ipv4),
-        x => {
-            bail!("got {:?}", x);
-        }
-    }
 }
