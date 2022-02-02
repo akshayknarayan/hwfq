@@ -1,7 +1,5 @@
-use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
-use std::process::Command;
+use color_eyre::eyre::{bail, eyre, Report, WrapErr};
 use tracing::{debug, info, trace};
-use tun_tap::Iface;
 
 mod ip_socket;
 pub use ip_socket::IpIfaceSocket;
@@ -10,46 +8,33 @@ pub mod scheduler;
 use scheduler::Scheduler;
 
 pub struct Datapath<S: Scheduler> {
-    iface: Iface,
+    iface: IpIfaceSocket,
     out_port: OutputPort<S>,
 }
 
 impl<S: Scheduler + Send + 'static> Datapath<S> {
     pub fn new(
+        in_iface: String,
         fwd_iface: String,
         tx_rate_bytes_per_sec: Option<usize>,
         sch: S,
     ) -> Result<Self, Report> {
-        let iface =
-            Iface::new("hwfq-%d", tun_tap::Mode::Tun).wrap_err("could not create TUN interface")?;
+        let iface = IpIfaceSocket::new(in_iface)?;
         let this = Self {
             iface,
             out_port: OutputPort::new(fwd_iface, tx_rate_bytes_per_sec, sch)?,
         };
-        this.config_ip()?;
         Ok(this)
     }
 
-    fn config_ip(&self) -> Result<(), Report> {
-        let name = self.iface.name();
-        add_ip_addr(name, "100.64.0.1/24")?;
-        ip_link_up(name)?;
-        Ok(())
-    }
-
     pub fn run(self) -> Result<(), Report> {
-        info!(iface=?self.iface.name(), "starting");
+        info!(iface=?self.iface.iface(), "starting");
 
         let fwd = self.out_port.start()?;
         let mut buf = [0u8; 2048];
         loop {
             let len = self.iface.recv(&mut buf)?;
-            if len < 4 {
-                debug!(?len, "packet too small");
-                continue;
-            }
-
-            let recv_buf = &buf[4..len];
+            let recv_buf = &buf[0..len];
             let ip_hdr = match parse_and_get_ipv4_dst(recv_buf) {
                 Ok(a) => a,
                 Err(e) => {
@@ -66,7 +51,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
 
             // TODO route to output ports based on ip header?
             // currently we assume only 1.
-            let out_buf = &buf[4..len];
+            let out_buf = &buf[0..len];
             fwd.send(Pkt {
                 ip_hdr,
                 buf: out_buf.to_vec(),
@@ -258,22 +243,6 @@ fn parse_and_get_ipv4_dst(buf: &[u8]) -> Result<etherparse::Ipv4Header, Report> 
     let p = etherparse::PacketHeaders::from_ip_slice(buf)?;
     let ip_hdr = get_ipv4_hdr(p)?;
     Ok(ip_hdr)
-}
-
-fn add_ip_addr(dev: &str, ip_with_prefix: &str) -> Result<(), Report> {
-    let status = Command::new("ip")
-        .args(["addr", "add", "dev", dev, ip_with_prefix])
-        .status()?;
-    ensure!(status.success(), "ip addr add failed");
-    Ok(())
-}
-
-fn ip_link_up(dev: &str) -> Result<(), Report> {
-    let status = Command::new("ip")
-        .args(["link", "set", "up", "dev", dev])
-        .status()?;
-    ensure!(status.success(), "ip addr add failed");
-    Ok(())
 }
 
 fn get_ipv4_hdr<'a>(p: etherparse::PacketHeaders<'a>) -> Result<etherparse::Ipv4Header, Report> {

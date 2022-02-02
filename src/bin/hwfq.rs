@@ -10,7 +10,10 @@ use structopt::StructOpt;
 #[structopt(name = "hwfq")]
 struct Opt {
     #[structopt(short, long)]
-    interface_name: String,
+    in_interface_name: String,
+
+    #[structopt(short, long)]
+    out_interface_name: String,
 
     #[structopt(short, long)]
     rate_bytes_per_sec: Option<usize>,
@@ -36,12 +39,19 @@ pub fn main() -> Result<(), Report> {
 
     match opt.scheduler.as_str() {
         "none" => {
-            let s = Datapath::new(opt.interface_name, None, Fifo::new(0)).unwrap();
+            let s = Datapath::new(
+                opt.in_interface_name,
+                opt.out_interface_name,
+                None,
+                Fifo::new(0),
+            )
+            .unwrap();
             s.run().unwrap();
         }
         "fifo" => {
             let s = Datapath::new(
-                opt.interface_name,
+                opt.in_interface_name,
+                opt.out_interface_name,
                 Some(
                     opt.rate_bytes_per_sec
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
@@ -53,7 +63,8 @@ pub fn main() -> Result<(), Report> {
         }
         "drr" => {
             let s = Datapath::new(
-                opt.interface_name,
+                opt.in_interface_name,
+                opt.out_interface_name,
                 Some(
                     opt.rate_bytes_per_sec
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
@@ -72,7 +83,8 @@ pub fn main() -> Result<(), Report> {
                 wt?,
             )?;
             let s = Datapath::new(
-                opt.interface_name,
+                opt.in_interface_name,
+                opt.out_interface_name,
                 Some(
                     opt.rate_bytes_per_sec
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,

@@ -33,6 +33,13 @@ impl IpIfaceSocket {
         })
     }
 
+    pub fn recv(&self, buf: &mut [u8]) -> Result<usize, Report> {
+        let res =
+            unsafe { libc::recv(self.inner.as_raw_fd(), buf.as_mut_ptr() as _, buf.len(), 0) };
+        ensure!(res > 0, "raw socket recv failed");
+        Ok(res as _)
+    }
+
     pub fn send(&self, buf: &mut [u8], mut ip_hdr: Ipv4Header) -> Result<(), Report> {
         let len = buf.len();
 
