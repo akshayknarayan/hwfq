@@ -22,7 +22,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
         bind_addr: String,
     ) -> Result<Self, Report> {
         let iface =
-            Iface::new("hwfq-%d", tun_tap::Mode::Tun).wrap_err("could not create TUN interface")?;
+            Iface::new("hwfq-%d", tun_tap::Mode::Tap).wrap_err("could not create TAP interface")?;
         let this = Self {
             iface,
             out_port: OutputPort::new(fwd_iface, tx_rate_bytes_per_sec, sch)?,
@@ -41,6 +41,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
     pub fn run(self) -> Result<(), Report> {
         info!(iface=?self.iface.name(), "starting");
 
+        let bypass = self.out_port.get_bypass()?;
         let fwd = self.out_port.start()?;
         let mut buf = [0u8; 2048];
         loop {
@@ -54,16 +55,16 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
             let ip_hdr = match parse_and_get_ipv4_dst(recv_buf) {
                 Ok(a) => a,
                 Err(e) => {
-                    debug!(err = %format!("{:#?}", e), "could not parse packet as ipv4");
+                    trace!(err = %format!("{:#?}", e), "could not parse packet as ipv4");
+                    if let Err(err) = bypass.send(&buf) {
+                        debug!(?err, "error sending non-ipv4 packet via bypass");
+                    }
+
                     continue;
                 }
             };
 
-            //let mut out_buf = &mut buf[4..len];
-            //trace!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "queueing packet");
-            //if let Err(e) = self.out_port.fwd.send(&mut out_buf, ip_hdr) {
-            //    debug!(?e, "fwd error");
-            //}
+            trace!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "got packet");
 
             // TODO route to output ports based on ip header?
             // currently we assume only 1.
@@ -100,7 +101,6 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
         tx_rate_bytes_per_sec: Option<usize>,
         sch: S,
     ) -> Result<Self, Report> {
-        //let fwd = ip_socket::IpIfaceSocket::new(out_iface)?;
         let fwd = std::os::unix::net::UnixDatagram::unbound().unwrap();
         fwd.connect(out_iface).unwrap();
         Ok(Self {
@@ -108,6 +108,10 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
             tx_rate_bytes_per_sec,
             queue: sch,
         })
+    }
+
+    fn get_bypass(&self) -> Result<std::os::unix::net::UnixDatagram, Report> {
+        Ok(self.fwd.try_clone().wrap_err("try cloning unix socket")?)
     }
 
     fn start(self) -> Result<flume::Sender<Pkt>, Report> {
@@ -264,7 +268,7 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
 }
 
 fn parse_and_get_ipv4_dst(buf: &[u8]) -> Result<etherparse::Ipv4Header, Report> {
-    let p = etherparse::PacketHeaders::from_ip_slice(buf)?;
+    let p = etherparse::PacketHeaders::from_ethernet_slice(buf)?;
     let ip_hdr = get_ipv4_hdr(p)?;
     Ok(ip_hdr)
 }

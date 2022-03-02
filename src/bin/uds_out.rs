@@ -20,7 +20,7 @@ pub fn main() -> Result<(), Report> {
     let opt = Opt::from_args();
 
     let iface =
-        Iface::new("hwfq-%d", tun_tap::Mode::Tun).wrap_err("could not create TUN interface")?;
+        Iface::new("hwfq-%d", tun_tap::Mode::Tap).wrap_err("could not create TUN interface")?;
     config_ip(iface.name(), &opt.ip)?;
     let sk = UnixDatagram::bind(&opt.packet_source).unwrap();
 
