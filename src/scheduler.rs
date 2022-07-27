@@ -433,12 +433,14 @@ impl WeightTree {
     ///         weight: 2
     /// ```
     pub fn from_file(file: impl AsRef<std::path::Path>) -> Result<Self, Report> {
-        let cfg_str = std::fs::read_to_string(file)?;
+        let cfg_str = std::fs::read_to_string(file.as_ref())
+            .wrap_err(eyre!("Could not read {:?}", file.as_ref()))?;
         Self::from_str(&cfg_str)
     }
 
     pub fn from_str(cfg: &str) -> Result<Self, Report> {
-        let yaml = yaml_rust::YamlLoader::load_from_str(cfg)?;
+        let yaml =
+            yaml_rust::YamlLoader::load_from_str(cfg).wrap_err(eyre!("Error reading {:?}", cfg))?;
         ensure!(yaml.len() == 1, "Tree cfg needs exactly one element");
         let children = yaml
             .into_iter()
