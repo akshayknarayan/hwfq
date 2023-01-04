@@ -473,7 +473,49 @@ impl WeightTree {
         }
     }
 
-    pub fn add_child(mut self, child_ips: Vec<u32>, child: Self) -> Result<Self, Report> {
+    fn check_and_collect_ips(&self) -> Result<Vec<u32>, Report> {
+        match &self {
+            WeightTree::Leaf { .. } => Ok(Vec::new()),
+            WeightTree::NonLeaf { ips, children, .. } => {
+                let mut node_ips = Vec::new();
+                for c in 0..MAX_NUM_CHILDREN {
+                    if let Some(ref child) = children[c] {
+                        match child.as_ref() {
+                            WeightTree::Leaf { .. } => {
+                                node_ips.extend(ips[c].clone());
+                            }
+                            WeightTree::NonLeaf { .. } => {
+                                let child_ips = child.check_and_collect_ips()?;
+                                ensure!(
+                                    child_ips == ips[c],
+                                    "Node IP list mismatched children: {:?}",
+                                    self
+                                );
+                                node_ips.extend(child_ips);
+                            }
+                        }
+                    }
+                }
+
+                node_ips.sort();
+                Ok(node_ips)
+            }
+        }
+    }
+
+    pub fn add_child(mut self, mut child_ips: Vec<u32>, child: Self) -> Result<Self, Report> {
+        if let WeightTree::NonLeaf { .. } = &child {
+            child_ips.sort();
+            let collected_child_ips = child.check_and_collect_ips()?;
+            ensure!(
+                child_ips == collected_child_ips,
+                "Mismatched ips with ips present in child tree: {:?} != {:?}, {:?}",
+                child_ips,
+                collected_child_ips,
+                child
+            );
+        }
+
         match &mut self {
             WeightTree::Leaf { .. } => bail!("Cannot add child to leaf"),
             &mut WeightTree::NonLeaf {
@@ -663,13 +705,10 @@ mod t {
     fn weight_tree() {
         init();
         let wt = WeightTree::parent(1)
-            .add_child(
-                vec![u32::from_be_bytes([42, 1, 0, 255])],
-                WeightTree::leaf(1),
-            )
+            .add_child(vec![u32::from_be_bytes([42, 1, 0, 3])], WeightTree::leaf(1))
             .unwrap()
             .add_child(
-                vec![u32::from_be_bytes([42, 1, 1, 255])],
+                vec![u32::from_be_bytes([42, 1, 1, 15])],
                 WeightTree::leaf(2),
             )
             .unwrap();
@@ -678,20 +717,31 @@ mod t {
         let ft = wt.into_flow_tree().unwrap();
         dbg!(ft);
 
-        let wt = WeightTree::parent(1)
-            .add_child(
-                vec![u32::from_be_bytes([42, 1, 0, 255])],
-                WeightTree::leaf(1),
-            )
+        let _wt = WeightTree::parent(1)
+            .add_child(vec![u32::from_be_bytes([42, 1, 0, 5])], WeightTree::leaf(1))
             .unwrap()
             .add_child(
-                vec![u32::from_be_bytes([42, 1, 1, 255])],
+                vec![u32::from_be_bytes([42, 1, 1, 9])],
                 WeightTree::parent(2),
             )
-            .unwrap();
-        dbg!(&wt);
+            .unwrap_err();
+    }
 
-        let _ = wt.into_flow_tree().unwrap_err();
+    #[test]
+    fn bad_weight_tree() {
+        init();
+        let _wt = WeightTree::parent(1)
+            .add_child(vec![], WeightTree::leaf(1))
+            .unwrap()
+            .add_child(
+                vec![],
+                WeightTree::parent(2)
+                    .add_child(vec![0x1], WeightTree::leaf(1)) // "D"
+                    .unwrap()
+                    .add_child(vec![0x2], WeightTree::leaf(2)) // "E"
+                    .unwrap(),
+            )
+            .unwrap_err();
     }
 
     fn make_test_tree() -> (
