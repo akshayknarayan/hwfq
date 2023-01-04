@@ -20,6 +20,9 @@ color-eyre = "0.6"
 structopt = { version = "0.3", optional = true }
 tracing-subscriber  = { version = "0.3", optional = true }
 
+[dev-dependencies]
+tracing-subscriber = "0.3"
+
 [[bin]]
 name = "hwfq"
 required-features = ["bin"]

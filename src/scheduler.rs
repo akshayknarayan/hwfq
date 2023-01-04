@@ -1,7 +1,7 @@
 use super::Pkt;
 use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
 use std::collections::VecDeque;
-use tracing::trace;
+use tracing::{debug, trace};
 
 pub trait Scheduler {
     /// Enqueue a packet into the scheduler's queue.
@@ -157,9 +157,9 @@ pub enum FlowTree {
         queue: VecDeque<Pkt>,
     },
     NonLeaf {
-        // a netmask to classify enqueues into children. if (src_ip or dst_ip) | classify[i] == classify[i], we
+        // a list of ips to classify enqueues into children. if classify[i].contains( { src_ip or dst_ip }), we
         // enq into children[i].
-        classify: [u32; 4],
+        classify: [Vec<u32>; 4],
 
         deficit: usize,
         quanta: usize,
@@ -186,17 +186,17 @@ impl std::fmt::Debug for FlowTree {
 
             &FlowTree::NonLeaf {
                 quanta,
-                classify,
+                ref classify,
                 ref children,
                 ..
             } => {
                 let mut s = f.debug_struct("FlowTree::NonLeaf");
                 s.field("quanta", &quanta)
-                    .field("child0", &(u32::to_be_bytes(classify[0]), &children[0]));
+                    .field("child0", &(&classify[0], &children[0]));
 
                 for i in 1..=3 {
-                    if classify[i] > 0 {
-                        s.field("child", &(u32::to_be_bytes(classify[i]), &children[i]));
+                    if !classify[i].is_empty() {
+                        s.field("child", &(&classify[i], &children[i]));
                     }
                 }
 
@@ -225,12 +225,12 @@ impl FlowTree {
             }
             &mut FlowTree::NonLeaf {
                 ref mut children,
-                classify,
+                ref mut classify,
                 ref mut curr_qlen,
                 ..
             } => {
                 for i in 0..children.len() {
-                    if classify[i] == 0 {
+                    if classify[i].is_empty() {
                         continue;
                     }
 
@@ -240,15 +240,14 @@ impl FlowTree {
                         u32::from_be_bytes(p.ip_hdr.destination)
                     };
 
-                    if (ip | classify[i]) == classify[i] {
+                    if classify[i].iter().any(|i| ip == *i) {
                         *curr_qlen += p.buf.len();
                         children[i].enqueue::<USE_SRC_IP>(p);
                         return;
                     }
                 }
 
-                // panic!("Packet did not match any classifications: {:#?}", p.ip_hdr);
-                eprintln!("Packet did not match any classifications: {:#?}", p.ip_hdr);
+                debug!(ip_hdr = ?p.ip_hdr, "Packet did not match any classifications");
                 return;
             }
         }
@@ -347,6 +346,8 @@ impl FlowTree {
     }
 }
 
+const MAX_NUM_CHILDREN: usize = 4;
+
 #[derive(Clone, Debug)]
 pub enum WeightTree {
     Leaf {
@@ -354,21 +355,13 @@ pub enum WeightTree {
     },
     NonLeaf {
         weight: usize,
-        netmasks: [u32; 4],
-        children: [Option<Box<WeightTree>>; 4],
+        ips: [Vec<u32>; MAX_NUM_CHILDREN],
+        children: [Option<Box<WeightTree>>; MAX_NUM_CHILDREN],
     },
 }
 
-fn parse_netmask(prefix_notation: &str) -> Result<u32, Report> {
-    let slash = prefix_notation
-        .find('/')
-        .ok_or_else(|| eyre!("prefix must be of form a.b.c.d/e"))?;
-    let (ip, pfx) = prefix_notation.split_at(slash);
+fn parse_ip(ip: &str) -> Result<u32, Report> {
     let ip: Vec<_> = ip.split('.').collect();
-    let pfx: u8 = pfx[1..]
-        .parse()
-        .wrap_err(eyre!("prefix {:?} not parsed", pfx))?;
-    ensure!(pfx <= 32, "Prefix must be 0-32");
     ensure!(ip.len() == 4, "ip must be a.b.c.d");
     let (a, b, c, d) = match &ip[..] {
         &[a, b, c, d] => (a.parse()?, b.parse()?, c.parse()?, d.parse()?),
@@ -376,39 +369,45 @@ fn parse_netmask(prefix_notation: &str) -> Result<u32, Report> {
     };
 
     let ip = u32::from_be_bytes([a, b, c, d]);
-    let mask = (1 << (32 - pfx)) - 1;
-    Ok(ip | mask)
+    Ok(ip)
 }
 
 use yaml_rust::Yaml;
-fn from_yaml(yaml: Yaml) -> Result<(u32, WeightTree), Report> {
+fn from_yaml(yaml: Yaml) -> Result<(Vec<u32>, WeightTree), Report> {
     let mut node = yaml
         .into_hash()
         .ok_or_else(|| eyre!("Node must be dictionary"))?;
-    let netmask = node
-        .remove(&Yaml::String("prefix".to_owned()))
-        .ok_or_else(|| eyre!("Need prefix key"))?
-        .into_string()
-        .ok_or_else(|| eyre!("Prefix must be string"))?;
-    let netmask =
-        parse_netmask(&netmask).wrap_err(eyre!("Parsing prefix notation {:?}", &netmask))?;
+    let ips = node
+        .remove(&Yaml::String("ips".to_owned()))
+        .ok_or_else(|| eyre!("Need ips key"))?
+        .into_vec()
+        .ok_or_else(|| eyre!("ips must be string array"))?
+        .into_iter()
+        .map(|ip_yaml| {
+            let ip_str = ip_yaml
+                .into_string()
+                .ok_or_else(|| eyre!("ip must be a string"))?;
+            parse_ip(&ip_str)
+        })
+        .collect::<Result<_, Report>>()?;
     let weight = node
         .remove(&Yaml::String("weight".to_owned()))
         .ok_or_else(|| eyre!("Need weight key"))?
         .into_i64()
         .ok_or_else(|| eyre!("Weight must be uint"))? as usize;
+
     if let Some(children) = node.remove(&Yaml::String("children".to_owned())) {
         Ok((
-            netmask,
+            ips,
             children
                 .into_iter()
                 .try_fold(WeightTree::parent(weight), |parent, child| {
-                    let (netmask, child_node) = from_yaml(child)?;
-                    parent.add_child(netmask, child_node)
+                    let (ips, child_node) = from_yaml(child)?;
+                    parent.add_child(ips, child_node)
                 })?,
         ))
     } else {
-        Ok((netmask, WeightTree::leaf(weight)))
+        Ok((ips, WeightTree::leaf(weight)))
     }
 }
 
@@ -419,17 +418,17 @@ impl WeightTree {
     /// ```yaml
     /// root:
     ///   - h0:
-    ///     prefix: "1.3.0.0/16"
+    ///     ips: ["10.10.0.1"]
     ///     weight: 1
     ///   - h1:
-    ///     prefix: "1.2.0.0/16"
+    ///     ips: ["13.0.2.3","19.0.1.2"]
     ///     weight: 2
     ///     children:
     ///       - h3:
-    ///         prefix: "1.2.3.0/24"
+    ///         ips: ["13.0.2.3"]
     ///         weight: 1
     ///       - h4:
-    ///         prefix: "1.2.4.0/24"
+    ///         ips: ["19.0.1.2"]
     ///         weight: 2
     /// ```
     pub fn from_file(file: impl AsRef<std::path::Path>) -> Result<Self, Report> {
@@ -456,8 +455,8 @@ impl WeightTree {
         children
             .into_iter()
             .try_fold(Self::parent(1), |parent, child| {
-                let (netmask, child_node) = from_yaml(child)?;
-                parent.add_child(netmask, child_node)
+                let (ips, child_node) = from_yaml(child)?;
+                parent.add_child(ips, child_node)
             })
     }
 
@@ -466,24 +465,25 @@ impl WeightTree {
     }
 
     pub fn parent(weight: usize) -> Self {
+        const INIT_VEC: Vec<u32> = Vec::new();
         WeightTree::NonLeaf {
             weight,
-            netmasks: [0u32; 4],
+            ips: [INIT_VEC; 4],
             children: [None, None, None, None],
         }
     }
 
-    pub fn add_child(mut self, netmask: u32, child: Self) -> Result<Self, Report> {
+    pub fn add_child(mut self, child_ips: Vec<u32>, child: Self) -> Result<Self, Report> {
         match &mut self {
             WeightTree::Leaf { .. } => bail!("Cannot add child to leaf"),
             &mut WeightTree::NonLeaf {
-                ref mut netmasks,
+                ref mut ips,
                 ref mut children,
                 ..
             } => {
-                for c in 0..4 {
-                    if netmasks[c] == 0 {
-                        netmasks[c] = netmask;
+                for c in 0..MAX_NUM_CHILDREN {
+                    if ips[c].is_empty() {
+                        ips[c] = child_ips;
                         children[c] = Some(Box::new(child));
                         break;
                     }
@@ -540,9 +540,7 @@ impl WeightTree {
                 queue: Default::default(),
             },
             WeightTree::NonLeaf {
-                netmasks,
-                mut children,
-                ..
+                ips, mut children, ..
             } => {
                 let sum_weights: usize = children
                     .iter()
@@ -581,7 +579,7 @@ impl WeightTree {
                 );
                 FlowTree::NonLeaf {
                     quanta: quantum,
-                    classify: netmasks,
+                    classify: ips,
                     deficit: 0,
                     curr_qlen: 0,
                     curr_child: 0,
@@ -651,12 +649,29 @@ mod t {
     use super::{Scheduler, WeightTree};
     use crate::Pkt;
 
+    fn init() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            tracing_subscriber::fmt::init();
+            color_eyre::install().unwrap();
+        })
+    }
+
     #[test]
     fn weight_tree() {
+        init();
         let wt = WeightTree::parent(1)
-            .add_child(u32::from_be_bytes([42, 1, 0, 255]), WeightTree::leaf(1))
+            .add_child(
+                vec![u32::from_be_bytes([42, 1, 0, 255])],
+                WeightTree::leaf(1),
+            )
             .unwrap()
-            .add_child(u32::from_be_bytes([42, 1, 1, 255]), WeightTree::leaf(2))
+            .add_child(
+                vec![u32::from_be_bytes([42, 1, 1, 255])],
+                WeightTree::leaf(2),
+            )
             .unwrap();
         dbg!(&wt);
 
@@ -664,25 +679,41 @@ mod t {
         dbg!(ft);
 
         let wt = WeightTree::parent(1)
-            .add_child(u32::from_be_bytes([42, 1, 0, 255]), WeightTree::leaf(1))
+            .add_child(
+                vec![u32::from_be_bytes([42, 1, 0, 255])],
+                WeightTree::leaf(1),
+            )
             .unwrap()
-            .add_child(u32::from_be_bytes([42, 1, 1, 255]), WeightTree::parent(2))
+            .add_child(
+                vec![u32::from_be_bytes([42, 1, 1, 255])],
+                WeightTree::parent(2),
+            )
             .unwrap();
         dbg!(&wt);
 
-        wt.into_flow_tree().unwrap_err();
+        let _ = wt.into_flow_tree().unwrap_err();
     }
 
-    fn make_test_tree() -> super::HierarchicalDeficitWeightedRoundRobin {
+    fn make_test_tree() -> (
+        super::HierarchicalDeficitWeightedRoundRobin,
+        [u8; 4],
+        [u8; 4],
+        [u8; 4],
+    ) {
+        let all_ips = [
+            u32::from_be_bytes([42, 0, 0, 0]),
+            u32::from_be_bytes([42, 1, 1, 1]),
+            u32::from_be_bytes([42, 1, 2, 1]),
+        ];
         let wt = WeightTree::parent(1)
-            .add_child(u32::from_be_bytes([42, 0, 0, 255]), WeightTree::leaf(1)) // "B"
+            .add_child(vec![all_ips[0]], WeightTree::leaf(1)) // "B"
             .unwrap()
             .add_child(
-                u32::from_be_bytes([42, 1, 255, 255]),
+                all_ips[1..].to_vec(),
                 WeightTree::parent(2)
-                    .add_child(u32::from_be_bytes([42, 1, 1, 255]), WeightTree::leaf(1)) // "D"
+                    .add_child(vec![all_ips[1]], WeightTree::leaf(1)) // "D"
                     .unwrap()
-                    .add_child(u32::from_be_bytes([42, 1, 2, 255]), WeightTree::leaf(2)) // "E"
+                    .add_child(vec![all_ips[2]], WeightTree::leaf(2)) // "E"
                     .unwrap(),
             )
             .unwrap();
@@ -695,15 +726,18 @@ mod t {
         )
         .unwrap();
 
-        hwfq
+        (
+            hwfq,
+            u32::to_be_bytes(all_ips[0]),
+            u32::to_be_bytes(all_ips[1]),
+            u32::to_be_bytes(all_ips[2]),
+        )
     }
 
     #[test]
-    fn hwfq() {
-        let mut hwfq = make_test_tree();
-        let b_ip = [42, 0, 0, 0];
-        let d_ip = [42, 1, 1, 0];
-        let e_ip = [42, 1, 2, 0];
+    fn hwfq_basic() {
+        init();
+        let (mut hwfq, b_ip, d_ip, e_ip) = make_test_tree();
         let dst_ip = [42, 2, 0, 0];
 
         assert_eq!(hwfq.tree.tot_qlen(), 0, "");
@@ -774,11 +808,8 @@ mod t {
 
     #[test]
     fn hwfq_partially_active() {
-        let mut hwfq = make_test_tree();
-
-        let b_ip = [42, 0, 0, 0];
-        let d_ip = [42, 1, 1, 0];
-        let e_ip = [42, 1, 2, 0];
+        init();
+        let (mut hwfq, b_ip, d_ip, e_ip) = make_test_tree();
         let dst_ip = [42, 2, 0, 0];
 
         assert_eq!(hwfq.tree.tot_qlen(), 0, "");
@@ -836,35 +867,35 @@ mod t {
     }
 
     #[test]
-    fn parse_netmask() {
-        let p = "42.1.2.15/24";
-        let m = super::parse_netmask(&p).unwrap();
-        assert_eq!(m, u32::from_be_bytes([42, 1, 2, 255]));
+    fn parse_ip() {
+        init();
 
-        let p = "1.1.1.1/16";
-        let m = super::parse_netmask(&p).unwrap();
-        assert_eq!(m, u32::from_be_bytes([1, 1, 255, 255]));
+        let p = "42.1.2.15";
+        let m = super::parse_ip(&p).unwrap();
+        assert_eq!(m, u32::from_be_bytes([42, 1, 2, 15]));
 
-        let p = "1.1.1.1/33";
-        super::parse_netmask(&p).unwrap_err();
+        let p = "1.1.1.1";
+        let m = super::parse_ip(&p).unwrap();
+        assert_eq!(m, u32::from_be_bytes([1, 1, 1, 1]));
     }
 
     #[test]
     fn parse_yaml() {
+        init();
         let cfg_str = "\
 root:
   - h0:
-    prefix: \"42.0.0.0/16\"
+    ips: [\"42.0.0.0\"]
     weight: 1
   - h1:
-    prefix: \"42.1.0.0/16\"
+    ips: [\"42.1.3.0\", \"42.1.4.0\"]
     weight: 2
     children:
       - h3:
-        prefix: \"42.1.3.0/24\"
+        ips: [\"42.1.3.0\"]
         weight: 1
       - h4:
-        prefix: \"42.1.4.0/24\"
+        ips: [\"42.1.4.0\"]
         weight: 2
         ";
 
@@ -875,23 +906,23 @@ root:
                 wt,
                 WeightTree::NonLeaf {
                     weight: 1,
-                    netmasks: [0x2a00ffff, 0x2a01ffff, 0, 0],
                     children: [
                         Some(l1 ),
                         Some(l2 ),
                         None,
                         None,
                     ],
+                    ..
                 } if matches!(&*l1, &WeightTree::Leaf { weight: 1 }) &&
                      matches!(&*l2, &WeightTree::NonLeaf {
                             weight: 2,
-                            netmasks: [0x2a0103ff, 0x2a0104ff, 0, 0],
                             children: [
                                 Some(ref l3 ),
                                 Some(ref l4 ),
                                 None,
                                 None
                             ],
+                            ..
                     } if matches!(&**l3, WeightTree::Leaf { weight: 1 }) &&
                          matches!(&**l4, WeightTree::Leaf { weight: 2 })
                     )
@@ -902,15 +933,21 @@ root:
 
     #[test]
     fn receive_hwfq() {
+        init();
+        let dst_ips = [[42, 0, 0, 9], [42, 1, 1, 3], [42, 1, 2, 6]];
+
         let wt = WeightTree::parent(1)
-            .add_child(u32::from_be_bytes([42, 0, 0, 255]), WeightTree::leaf(1)) // "B"
+            .add_child(vec![u32::from_be_bytes(dst_ips[0])], WeightTree::leaf(1)) // "B"
             .unwrap()
             .add_child(
-                u32::from_be_bytes([42, 1, 255, 255]),
+                vec![
+                    u32::from_be_bytes(dst_ips[1]),
+                    u32::from_be_bytes(dst_ips[2]),
+                ],
                 WeightTree::parent(2)
-                    .add_child(u32::from_be_bytes([42, 1, 1, 255]), WeightTree::leaf(1)) // "D"
+                    .add_child(vec![u32::from_be_bytes(dst_ips[1])], WeightTree::leaf(1)) // "D"
                     .unwrap()
-                    .add_child(u32::from_be_bytes([42, 1, 2, 255]), WeightTree::leaf(2)) // "E"
+                    .add_child(vec![u32::from_be_bytes(dst_ips[2])], WeightTree::leaf(2)) // "E"
                     .unwrap(),
             )
             .unwrap();
@@ -921,9 +958,9 @@ root:
         )
         .unwrap();
 
-        let b_ip = [42, 0, 0, 0];
-        let d_ip = [42, 1, 1, 0];
-        let e_ip = [42, 1, 2, 0];
+        let b_ip = dst_ips[0];
+        let d_ip = dst_ips[1];
+        let e_ip = dst_ips[2];
         let src_ip = [42, 2, 0, 0];
 
         assert_eq!(hwfq.tree.tot_qlen(), 0, "");
