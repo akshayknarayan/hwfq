@@ -10,7 +10,7 @@ struct Opt {
     #[structopt(short, long)]
     packet_source: std::path::PathBuf,
 
-    #[structopt(long)]
+    #[structopt(long, default_value = "100.64.0.1")]
     ip: String,
 }
 
