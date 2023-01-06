@@ -7,6 +7,9 @@ use tun_tap::Iface;
 #[derive(StructOpt, Debug)]
 #[structopt(name = "uds_out")]
 struct Opt {
+    #[structopt(short, long, default_value = "hwfq-%d")]
+    listen_interface: String,
+
     #[structopt(short, long)]
     packet_source: std::path::PathBuf,
 
@@ -19,8 +22,8 @@ pub fn main() -> Result<(), Report> {
     tracing_subscriber::fmt::init();
     let opt = Opt::from_args();
 
-    let iface =
-        Iface::new("hwfq-%d", tun_tap::Mode::Tap).wrap_err("could not create TUN interface")?;
+    let iface = Iface::new(&opt.listen_interface, tun_tap::Mode::Tap)
+        .wrap_err("could not create TUN interface")?;
     config_ip(iface.name(), &opt.ip)?;
     let sk = UnixDatagram::bind(&opt.packet_source).unwrap();
 
@@ -42,7 +45,7 @@ pub fn main() -> Result<(), Report> {
 
 use std::process::Command;
 fn config_ip(name: &str, ip: &str) -> Result<(), Report> {
-    add_ip_addr(name, &ip)?;
+    //add_ip_addr(name, &ip)?;
     ip_link_up(name)?;
     Ok(())
 }
@@ -58,6 +61,6 @@ fn ip_link_up(dev: &str) -> Result<(), Report> {
     let status = Command::new("ip")
         .args(["link", "set", "up", "dev", dev])
         .status()?;
-    ensure!(status.success(), "ip addr add failed");
+    ensure!(status.success(), "ip link up failed");
     Ok(())
 }

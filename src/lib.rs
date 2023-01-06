@@ -16,13 +16,14 @@ pub struct Datapath<S: Scheduler> {
 
 impl<S: Scheduler + Send + 'static> Datapath<S> {
     pub fn new(
-        fwd_iface: String,
+        listen_iface: &str,
+        fwd_iface: &str,
         tx_rate_bytes_per_sec: Option<usize>,
         sch: S,
         bind_addr: String,
     ) -> Result<Self, Report> {
-        let iface =
-            Iface::new("hwfq-%d", tun_tap::Mode::Tap).wrap_err("could not create TAP interface")?;
+        let iface = Iface::new(listen_iface, tun_tap::Mode::Tap)
+            .wrap_err("could not create TAP interface")?;
         let this = Self {
             iface,
             out_port: OutputPort::new(fwd_iface, tx_rate_bytes_per_sec, sch)?,
@@ -33,7 +34,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
 
     fn config_ip(&self, bind_addr: &str) -> Result<(), Report> {
         let name = self.iface.name();
-        add_ip_addr(name, bind_addr)?;
+        //add_ip_addr(name, bind_addr)?;
         ip_link_up(name)?;
         Ok(())
     }
@@ -96,11 +97,7 @@ struct OutputPort<S> {
 }
 
 impl<S: Scheduler + Send + 'static> OutputPort<S> {
-    fn new(
-        out_iface: String,
-        tx_rate_bytes_per_sec: Option<usize>,
-        sch: S,
-    ) -> Result<Self, Report> {
+    fn new(out_iface: &str, tx_rate_bytes_per_sec: Option<usize>, sch: S) -> Result<Self, Report> {
         let fwd = std::os::unix::net::UnixDatagram::unbound().unwrap();
         fwd.connect(out_iface).unwrap();
         Ok(Self {
@@ -294,6 +291,6 @@ fn ip_link_up(dev: &str) -> Result<(), Report> {
     let status = Command::new("ip")
         .args(["link", "set", "up", "dev", dev])
         .status()?;
-    ensure!(status.success(), "ip addr add failed");
+    ensure!(status.success(), "ip link set up failed");
     Ok(())
 }
