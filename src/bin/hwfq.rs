@@ -27,9 +27,6 @@ struct Opt {
     #[structopt(short, long)]
     scheduler: String,
 
-    #[structopt(long, default_value = "100.64.0.1")]
-    ip: String,
-
     #[structopt(short, long, required_if("scheduler", "hwfq"))]
     weights_cfg: Option<std::path::PathBuf>,
 }
@@ -42,14 +39,8 @@ pub fn main() -> Result<(), Report> {
 
     match opt.scheduler.as_str() {
         "none" => {
-            let s = Datapath::new(
-                &opt.listen_interface,
-                &opt.fwd_address,
-                None,
-                Fifo::new(0),
-                opt.ip,
-            )
-            .unwrap();
+            let s =
+                Datapath::new(&opt.listen_interface, &opt.fwd_address, None, Fifo::new(0)).unwrap();
             s.run().unwrap();
         }
         "fifo" => {
@@ -61,7 +52,6 @@ pub fn main() -> Result<(), Report> {
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
                 ),
                 Fifo::new(opt.queue_size_bytes),
-                opt.ip,
             )
             .unwrap();
             s.run().unwrap();
@@ -75,7 +65,6 @@ pub fn main() -> Result<(), Report> {
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
                 ),
                 Drr::new(opt.queue_size_bytes),
-                opt.ip,
             )
             .unwrap();
             s.run().unwrap();
@@ -96,7 +85,6 @@ pub fn main() -> Result<(), Report> {
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
                 ),
                 hwfq,
-                opt.ip,
             )?;
             s.run().unwrap();
         }

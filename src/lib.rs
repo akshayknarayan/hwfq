@@ -20,7 +20,6 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
         fwd_iface: &str,
         tx_rate_bytes_per_sec: Option<usize>,
         sch: S,
-        bind_addr: String,
     ) -> Result<Self, Report> {
         let iface = Iface::new(listen_iface, tun_tap::Mode::Tap)
             .wrap_err("could not create TAP interface")?;
@@ -28,13 +27,12 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
             iface,
             out_port: OutputPort::new(fwd_iface, tx_rate_bytes_per_sec, sch)?,
         };
-        this.config_ip(&bind_addr)?;
+        this.config_ip()?;
         Ok(this)
     }
 
-    fn config_ip(&self, bind_addr: &str) -> Result<(), Report> {
+    fn config_ip(&self) -> Result<(), Report> {
         let name = self.iface.name();
-        //add_ip_addr(name, bind_addr)?;
         ip_link_up(name)?;
         Ok(())
     }
@@ -277,14 +275,6 @@ fn get_ipv4_hdr<'a>(p: etherparse::PacketHeaders<'a>) -> Result<etherparse::Ipv4
             bail!("got {:?}", x);
         }
     }
-}
-
-fn add_ip_addr(dev: &str, ip_with_prefix: &str) -> Result<(), Report> {
-    let status = Command::new("ip")
-        .args(["addr", "add", "dev", dev, ip_with_prefix])
-        .status()?;
-    ensure!(status.success(), "ip addr add failed");
-    Ok(())
 }
 
 fn ip_link_up(dev: &str) -> Result<(), Report> {

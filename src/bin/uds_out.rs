@@ -12,9 +12,6 @@ struct Opt {
 
     #[structopt(short, long)]
     packet_source: std::path::PathBuf,
-
-    #[structopt(long, default_value = "100.64.0.1")]
-    ip: String,
 }
 
 pub fn main() -> Result<(), Report> {
@@ -24,7 +21,7 @@ pub fn main() -> Result<(), Report> {
 
     let iface = Iface::new(&opt.listen_interface, tun_tap::Mode::Tap)
         .wrap_err("could not create TUN interface")?;
-    config_ip(iface.name(), &opt.ip)?;
+    config_ip(iface.name())?;
     let sk = UnixDatagram::bind(&opt.packet_source).unwrap();
 
     fn msg(sk: &UnixDatagram, buf: &mut [u8], iface: &Iface) -> Result<(), Report> {
@@ -44,16 +41,8 @@ pub fn main() -> Result<(), Report> {
 }
 
 use std::process::Command;
-fn config_ip(name: &str, ip: &str) -> Result<(), Report> {
-    //add_ip_addr(name, &ip)?;
+fn config_ip(name: &str) -> Result<(), Report> {
     ip_link_up(name)?;
-    Ok(())
-}
-fn add_ip_addr(dev: &str, ip_with_prefix: &str) -> Result<(), Report> {
-    let status = Command::new("ip")
-        .args(["addr", "add", "dev", dev, ip_with_prefix])
-        .status()?;
-    ensure!(status.success(), "ip addr add failed");
     Ok(())
 }
 
