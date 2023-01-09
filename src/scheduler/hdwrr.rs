@@ -4,6 +4,59 @@ use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
 use std::collections::VecDeque;
 use tracing::debug;
 
+pub struct HierarchicalDeficitWeightedRoundRobin {
+    limit_bytes: usize,
+    lookup_on_src_ip: bool,
+    tree: FlowTree,
+}
+
+impl HierarchicalDeficitWeightedRoundRobin {
+    pub fn new(
+        limit_bytes: usize,
+        lookup_on_src_ip: bool,
+        weight_tree: WeightTree,
+    ) -> Result<Self, Report> {
+        Ok(Self {
+            limit_bytes,
+            lookup_on_src_ip,
+            tree: weight_tree.into_flow_tree()?,
+        })
+    }
+}
+
+impl Scheduler for HierarchicalDeficitWeightedRoundRobin {
+    fn enq(&mut self, p: Pkt) -> Result<(), Report> {
+        let pkt_len = p.buf.len();
+        ensure!(
+            self.tree.tot_qlen() + pkt_len <= self.limit_bytes,
+            "Dropping packet"
+        );
+
+        if self.lookup_on_src_ip {
+            self.tree.enqueue::<true>(p);
+        } else {
+            self.tree.enqueue::<false>(p);
+        }
+        Ok(())
+    }
+
+    fn deq(&mut self) -> Result<Option<Pkt>, Report> {
+        if self.tree.tot_qlen() == 0 {
+            return Ok(None);
+        }
+
+        // we know there is something to dequeue.
+        // so we must continue adding deficit until something dequeues.
+        loop {
+            if let Some(p) = self.tree.dequeue() {
+                return Ok(Some(p));
+            }
+
+            self.tree.add_deficit(self.tree.quanta());
+        }
+    }
+}
+
 pub enum FlowTree {
     Leaf {
         deficit: usize,
@@ -485,59 +538,6 @@ impl WeightTree {
                 }
             }
         })
-    }
-}
-
-pub struct HierarchicalDeficitWeightedRoundRobin {
-    limit_bytes: usize,
-    lookup_on_src_ip: bool,
-    tree: FlowTree,
-}
-
-impl HierarchicalDeficitWeightedRoundRobin {
-    pub fn new(
-        limit_bytes: usize,
-        lookup_on_src_ip: bool,
-        weight_tree: WeightTree,
-    ) -> Result<Self, Report> {
-        Ok(Self {
-            limit_bytes,
-            lookup_on_src_ip,
-            tree: weight_tree.into_flow_tree()?,
-        })
-    }
-}
-
-impl Scheduler for HierarchicalDeficitWeightedRoundRobin {
-    fn enq(&mut self, p: Pkt) -> Result<(), Report> {
-        let pkt_len = p.buf.len();
-        ensure!(
-            self.tree.tot_qlen() + pkt_len <= self.limit_bytes,
-            "Dropping packet"
-        );
-
-        if self.lookup_on_src_ip {
-            self.tree.enqueue::<true>(p);
-        } else {
-            self.tree.enqueue::<false>(p);
-        }
-        Ok(())
-    }
-
-    fn deq(&mut self) -> Result<Option<Pkt>, Report> {
-        if self.tree.tot_qlen() == 0 {
-            return Ok(None);
-        }
-
-        // we know there is something to dequeue.
-        // so we must continue adding deficit until something dequeues.
-        loop {
-            if let Some(p) = self.tree.dequeue() {
-                return Ok(Some(p));
-            }
-
-            self.tree.add_deficit(self.tree.quanta());
-        }
     }
 }
 
