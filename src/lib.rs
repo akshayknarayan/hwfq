@@ -37,7 +37,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
         Ok(())
     }
 
-    #[tracing::instrument(level = "info", err)]
+    #[tracing::instrument(level = "info", skip(self), err)]
     pub fn run(self) -> Result<(), Report> {
         info!(iface=?self.iface.name(), "starting");
 
@@ -120,7 +120,7 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
         Ok(s)
     }
 
-    #[tracing::instrument(level = "info", skip(r), err)]
+    #[tracing::instrument(level = "info", skip(self, r), err)]
     fn run_no_pacing(self, r: flume::Receiver<Pkt>) -> Result<(), Report> {
         info!("running with no pacing");
         let clk = quanta::Clock::new();
@@ -153,7 +153,7 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
         }
     }
 
-    #[tracing::instrument(level = "info", skip(r), err)]
+    #[tracing::instrument(level = "info", skip(self, r), err)]
     fn run(self, r: flume::Receiver<Pkt>, tx_rate_bytes_per_sec: usize) -> Result<(), Report> {
         // ticker
         // the bound here does not particularly matter. if we reach it, we will accumulate tokens
