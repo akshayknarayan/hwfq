@@ -1,9 +1,12 @@
 use super::Scheduler;
 use crate::Pkt;
 use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
+#[cfg(feature = "hwfq-audit")]
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use tracing::debug;
 
+#[derive(Debug)]
 pub struct HierarchicalDeficitWeightedRoundRobin {
     limit_bytes: usize,
     lookup_on_src_ip: bool,
@@ -55,7 +58,13 @@ impl Scheduler for HierarchicalDeficitWeightedRoundRobin {
             self.tree.add_deficit(self.tree.quanta());
         }
     }
+
+    fn dbg(&self) {
+        tracing::info!(?self.tree, "hdwrr tree state");
+    }
 }
+
+const MAX_NUM_CHILDREN: usize = 4;
 
 pub enum FlowTree {
     Leaf {
@@ -67,7 +76,7 @@ pub enum FlowTree {
     NonLeaf {
         // a list of ips to classify enqueues into children. if classify[i].contains( { src_ip or dst_ip }), we
         // enq into children[i].
-        classify: [Vec<u32>; 4],
+        classify: [Vec<u32>; MAX_NUM_CHILDREN],
 
         deficit: usize,
         quanta: usize,
@@ -76,8 +85,14 @@ pub enum FlowTree {
         curr_child: usize,
         // in theory the child list could be bigger (linked list), but meh, we are not going to test any topologies with
         // tree width > 4.
-        children: [Box<FlowTree>; 4],
-        children_remaining_quanta: [usize; 4],
+        children: [Box<FlowTree>; MAX_NUM_CHILDREN],
+        children_remaining_quanta: [usize; MAX_NUM_CHILDREN],
+
+        // bytes dequeued when the given configuration of non-empty queues was active.
+        #[cfg(feature = "hwfq-audit")]
+        curr_audit_state: [bool; MAX_NUM_CHILDREN],
+        #[cfg(feature = "hwfq-audit")]
+        audit_tracking: HashMap<[bool; MAX_NUM_CHILDREN], [usize; MAX_NUM_CHILDREN]>,
     },
 }
 
@@ -96,11 +111,15 @@ impl std::fmt::Debug for FlowTree {
                 quanta,
                 ref classify,
                 ref children,
+                #[cfg(feature = "hwfq-audit")]
+                ref audit_tracking,
                 ..
             } => {
                 let mut s = f.debug_struct("FlowTree::NonLeaf");
-                s.field("quanta", &quanta)
-                    .field("child0", &(&classify[0], &children[0]));
+                s.field("quanta", &quanta);
+                #[cfg(feature = "hwfq-audit")]
+                s.field("audit_tracking", audit_tracking);
+                s.field("child0", &(&classify[0], &children[0]));
 
                 for i in 1..=3 {
                     if !classify[i].is_empty() {
@@ -135,6 +154,10 @@ impl FlowTree {
                 ref mut children,
                 ref mut classify,
                 ref mut curr_qlen,
+                #[cfg(feature = "hwfq-audit")]
+                ref mut curr_audit_state,
+                #[cfg(feature = "hwfq-audit")]
+                ref mut audit_tracking,
                 ..
             } => {
                 for i in 0..children.len() {
@@ -150,6 +173,16 @@ impl FlowTree {
 
                     if classify[i].iter().any(|i| ip == *i) {
                         *curr_qlen += p.buf.len();
+
+                        #[cfg(feature = "hwfq-audit")]
+                        if !curr_audit_state[i] && children[i].tot_qlen() == 0 {
+                            curr_audit_state[i] = true;
+                            if !audit_tracking.contains_key(curr_audit_state) {
+                                audit_tracking
+                                    .insert(*curr_audit_state, [0usize; MAX_NUM_CHILDREN]);
+                            }
+                        }
+
                         children[i].enqueue::<USE_SRC_IP>(p);
                         return;
                     }
@@ -209,6 +242,10 @@ impl FlowTree {
                 ref mut curr_child,
                 ref mut children_remaining_quanta,
                 ref mut children,
+                #[cfg(feature = "hwfq-audit")]
+                ref mut curr_audit_state,
+                #[cfg(feature = "hwfq-audit")]
+                ref mut audit_tracking,
                 ..
             } => {
                 if *curr_qlen == 0 {
@@ -220,6 +257,19 @@ impl FlowTree {
                         // is our sub-leaf currently dequeueing packets that fit within credits we already gave it?
                         if let Some(p) = children[*curr_child].dequeue() {
                             *curr_qlen -= p.buf.len();
+
+                            #[cfg(feature = "hwfq-audit")]
+                            {
+                                let curr_state: &mut [usize; MAX_NUM_CHILDREN] =
+                                    audit_tracking.get_mut(curr_audit_state).unwrap();
+                                curr_state[*curr_child] += p.buf.len();
+
+                                if children[*curr_child].tot_qlen() == 0 {
+                                    assert!(curr_audit_state[*curr_child], "queue audit tracking is off: child was inactive when it should have been active.");
+                                    curr_audit_state[*curr_child] = false;
+                                }
+                            }
+
                             return Some(p);
                         }
 
@@ -253,8 +303,6 @@ impl FlowTree {
         }
     }
 }
-
-const MAX_NUM_CHILDREN: usize = 4;
 
 #[derive(Clone, Debug)]
 pub enum WeightTree {
@@ -535,6 +583,10 @@ impl WeightTree {
                     curr_child: 0,
                     children,
                     children_remaining_quanta: [0usize; 4],
+                    #[cfg(feature = "hwfq-audit")]
+                    curr_audit_state: Default::default(),
+                    #[cfg(feature = "hwfq-audit")]
+                    audit_tracking: Default::default(),
                 }
             }
         })
@@ -545,6 +597,7 @@ impl WeightTree {
 mod t {
     use super::{Scheduler, WeightTree};
     use crate::Pkt;
+    use tracing::info;
 
     fn init() {
         use std::sync::Once;
@@ -709,6 +762,8 @@ mod t {
         let e = e_cnt as isize;
         let twice_d = (d_cnt * 2) as isize;
         assert!((twice_d - e).abs() < 5);
+
+        info!(?hwfq.tree, "tree");
     }
 
     #[test]
