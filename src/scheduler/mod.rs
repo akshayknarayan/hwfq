@@ -13,6 +13,9 @@ pub trait Scheduler {
     /// Return `None` if the queue is empty and the dequeue thread should therefore go to sleep,
     /// and `Some(dequeued_packet)` otherwise.
     fn deq(&mut self) -> Result<Option<Pkt>, Report>;
+
+    /// Called periodically when it is time to dump debug info logs.
+    fn dbg(&self) {}
 }
 
 mod fifo;

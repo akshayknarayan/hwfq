@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 bin = ["structopt", "tracing-subscriber"]
+hwfq-audit = []
 
 [dependencies]
 tun-tap = "0.1"

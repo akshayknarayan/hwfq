@@ -238,6 +238,8 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
                                             let achieved_rate_mbps = epoch_rate_bytes_per_sec * 8. / 1e6;
                                             info!(?achieved_rate_mbps, ?el, "pacing update");
                                             achieved_tx_rate = None;
+
+                                            q.dbg();
                                         }
                                     }
                                 }
