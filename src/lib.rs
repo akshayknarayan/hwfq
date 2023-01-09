@@ -37,6 +37,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
         Ok(())
     }
 
+    #[tracing::instrument(level = "info", err)]
     pub fn run(self) -> Result<(), Report> {
         info!(iface=?self.iface.name(), "starting");
 
@@ -119,6 +120,7 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
         Ok(s)
     }
 
+    #[tracing::instrument(level = "info", skip(r), err)]
     fn run_no_pacing(self, r: flume::Receiver<Pkt>) -> Result<(), Report> {
         info!("running with no pacing");
         let clk = quanta::Clock::new();
@@ -145,15 +147,13 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
             }
 
             trace!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "forwarding packet");
-            //if let Err(e) = self.fwd.send(&mut buf, ip_hdr) {
-            //    debug!(?e, "fwd error");
-            //}
             if let Err(e) = self.fwd.send(&buf) {
                 debug!(?e, "fwd error");
             }
         }
     }
 
+    #[tracing::instrument(level = "info", skip(r), err)]
     fn run(self, r: flume::Receiver<Pkt>, tx_rate_bytes_per_sec: usize) -> Result<(), Report> {
         // ticker
         // the bound here does not particularly matter. if we reach it, we will accumulate tokens
@@ -161,7 +161,7 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
         // receiver's responsibility to not have a quiet period cause a massive burst of packets.
         let (ticker_s, ticker_r) = flume::bounded(32);
         let tx_rate_bytes_per_usec = tx_rate_bytes_per_sec as f64 / 1e6;
-        info!(?tx_rate_bytes_per_usec, "pacing");
+        info!(?tx_rate_bytes_per_sec, "pacing");
         std::thread::spawn(move || {
             // try to send tokens for ~ 1500 bytes at a time.
             let clk = quanta::Clock::new();
@@ -235,8 +235,8 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
                                         let el = clk.delta(*epoch_start, clk.raw());
                                         if el > std::time::Duration::from_millis(100) {
                                             let epoch_rate_bytes_per_sec = *bytes as f64 / el.as_secs_f64();
-                                            let rate_mbps = epoch_rate_bytes_per_sec * 8. / 1e6;
-                                            info!(?rate_mbps, ?el, "achieved_tx_rate");
+                                            let achieved_rate_mbps = epoch_rate_bytes_per_sec * 8. / 1e6;
+                                            info!(?achieved_rate_mbps, ?el, "pacing update");
                                             achieved_tx_rate = None;
                                         }
                                     }
@@ -245,9 +245,6 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
                                 accum_tokens -= p.buf.len() as isize;
                                 let Pkt { ip_hdr, buf } = p;
                                 trace!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "forwarding packet");
-                                //if let Err(e) = self.fwd.send(&mut buf, ip_hdr) {
-                                //    debug!(?e, "fwd error");
-                                //}
                                 if let Err(e) = self.fwd.send(&buf) {
                                     debug!(?e, "fwd error");
                                 }
