@@ -1,6 +1,7 @@
 use super::Scheduler;
 use crate::Pkt;
 use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
+use num::rational::Ratio;
 #[cfg(feature = "hwfq-audit")]
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -492,23 +493,72 @@ impl WeightTree {
         }
     }
 
-    fn get_min_quantum(&self) -> Result<usize, Report> {
+    /// We have a weight tree:
+    ///       root
+    ///     / | ...\
+    ///  w_1 w_2...w_i
+    ///  /|\  /|..../|\
+    ///
+    /// We want to find the minimum integer value Q for the root such that for each of its
+    /// children i, we can assign a quantum q_i s.t. sum(q_i) = Q and for all children i,j,
+    /// q_i / q_j = w_i / w_j, and this should recursively be true for each child i.
+    ///
+    /// Let's consider only one child, child i. This child's q_i = Q * w_i / sum_j(w_j).
+    /// Now let's consider child i's j children, w_i_j. From their perspective Q = q_i, so for
+    /// a particular sub-child i_j, q_i_j = q_i * w_i_j / sum_k(w_k).
+    ///
+    /// So, for a particular root node we can calculate its q as a function of Q by multiplying the
+    /// fractions of Q along the tree's path to the root node.
+    ///
+    /// Once we have these fractions for the tree's, we can calculate their greatest common divisor
+    /// (gcd).  gcd is conveniently associative, so we can do this recursively without collecting
+    /// all the fractions first.
+    ///
+    /// 1 / gcd (nodes) = lowest Q, but we return the gcd here, hence `_recip`.
+    fn calculate_root_quantum_recip(
+        &self,
+        quantum_fraction_so_far: Ratio<usize>,
+        weight_sum: usize,
+    ) -> Ratio<usize> {
         match self {
-            WeightTree::Leaf { weight } => Ok(*weight),
-            WeightTree::NonLeaf { children, .. } => {
-                let (children_min_quanta, children_weights): (Vec<_>, Vec<_>) = children
+            WeightTree::Leaf { weight } => {
+                quantum_fraction_so_far * Ratio::new(*weight, weight_sum)
+            }
+            WeightTree::NonLeaf {
+                weight, children, ..
+            } => {
+                let new_weight_sum: usize = children
                     .iter()
                     .filter_map(|c| c.as_ref())
-                    .map(|c| (c.get_min_quantum(), c.weight()))
-                    .unzip();
-                let weight_sum: usize = children_weights.into_iter().sum();
-                ensure!(weight_sum > 0, "NonLeaf node must have children");
-                let children_min_quanta_ok: Result<Vec<_>, _> =
-                    children_min_quanta.into_iter().collect();
-                let max_min_quanta = children_min_quanta_ok?.into_iter().max().unwrap();
-                Ok(max_min_quanta * weight_sum)
+                    .map(|c| c.weight())
+                    .sum();
+                let frac = quantum_fraction_so_far * Ratio::new(*weight, weight_sum);
+                children
+                    .iter()
+                    .filter_map(|c| c.as_ref())
+                    .fold(Ratio::from_integer(1), |acc, c| {
+                        let gcd_child = c.calculate_root_quantum_recip(frac, new_weight_sum);
+
+                        // gcd of two fractions is:
+                        // gcd(numerator1, numerator2) / lcm(denominator1, denominator2)
+                        Ratio::new(
+                            num::integer::gcd(*acc.numer(), *gcd_child.numer()),
+                            num::integer::lcm(*acc.denom(), *gcd_child.denom()),
+                        )
+                    })
             }
         }
+    }
+
+    fn get_min_quantum(&self) -> Result<usize, Report> {
+        let gcd = self.calculate_root_quantum_recip(Ratio::from_integer(1), self.weight());
+        let min_quantum = gcd.recip();
+        ensure!(
+            min_quantum.is_integer(),
+            "need an integer quantum. this is a bug in the quantum calculation"
+        );
+
+        Ok(min_quantum.to_integer())
     }
 
     fn weight(&self) -> usize {
@@ -525,6 +575,8 @@ impl WeightTree {
         if min_quantum < 500 {
             min_quantum *= 500 / min_quantum;
         }
+
+        dbg!(min_quantum);
 
         self.into_flow_tree_with_quantum(min_quantum)
     }
@@ -547,12 +599,14 @@ impl WeightTree {
                     .sum();
                 ensure!(sum_weights > 0, "no children for non-leaf node");
 
-                let child = |ch: Option<Box<WeightTree>>| {
+                let process_child = |ch: Option<Box<WeightTree>>| {
                     if let Some(c) = ch {
                         let wt = c.weight();
-                        Ok::<_, Report>(Box::new(
-                            c.into_flow_tree_with_quantum((wt * quantum) / sum_weights)?,
-                        ))
+                        // it is important that we multiply first before dividing by sum_weights,
+                        // since sum_weights might not be a divisor of quantum.
+                        let child_quantum = (wt * quantum) / sum_weights;
+
+                        Ok::<_, Report>(Box::new(c.into_flow_tree_with_quantum(child_quantum)?))
                     } else {
                         Ok(Box::new(FlowTree::Leaf {
                             quanta: 0,
@@ -563,11 +617,12 @@ impl WeightTree {
                     }
                 };
 
+                dbg!(quantum, sum_weights);
                 let children = [
-                    child(children[0].take())?,
-                    child(children[1].take())?,
-                    child(children[2].take())?,
-                    child(children[3].take())?,
+                    process_child(children[0].take())?,
+                    process_child(children[1].take())?,
+                    process_child(children[2].take())?,
+                    process_child(children[3].take())?,
                 ];
 
                 let sum_child_quanta: usize = children.iter().map(|c| c.quanta()).sum();
@@ -650,6 +705,35 @@ mod t {
                     .unwrap(),
             )
             .unwrap_err();
+    }
+
+    #[test]
+    fn min_quantum() {
+        init();
+        let wt = WeightTree::parent(1)
+            .add_child(
+                vec![0x1, 0x2, 0x3],
+                WeightTree::parent(3)
+                    .add_child(vec![0x1], WeightTree::leaf(2))
+                    .unwrap()
+                    .add_child(vec![0x2], WeightTree::leaf(3))
+                    .unwrap()
+                    .add_child(vec![0x3], WeightTree::leaf(4))
+                    .unwrap(),
+            )
+            .unwrap()
+            .add_child(
+                vec![0x4, 0x5],
+                WeightTree::parent(4)
+                    .add_child(vec![0x4], WeightTree::leaf(5))
+                    .unwrap()
+                    .add_child(vec![0x5], WeightTree::leaf(6))
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let min_quantum = wt.get_min_quantum().unwrap();
+        assert_eq!(min_quantum, 231);
     }
 
     fn make_test_tree() -> (
