@@ -7,6 +7,8 @@ fn main() -> Result<(), Report> {
         .nth(1)
         .ok_or_else(|| eyre!("need config file as argument"))?;
 
+    dbg!(&file_name);
+
     let wt = WeightTree::from_file(file_name)?;
     dbg!(&wt);
 
