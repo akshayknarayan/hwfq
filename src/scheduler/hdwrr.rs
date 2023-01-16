@@ -65,7 +65,7 @@ impl Scheduler for HierarchicalDeficitWeightedRoundRobin {
     }
 }
 
-const MAX_NUM_CHILDREN: usize = 4;
+const MAX_NUM_CHILDREN: usize = 8;
 
 pub enum FlowTree {
     Leaf {
@@ -423,10 +423,11 @@ impl WeightTree {
 
     pub fn parent(weight: usize) -> Self {
         const INIT_VEC: Vec<u32> = Vec::new();
+        const INIT_CHILD: Option<Box<WeightTree>> = None;
         WeightTree::NonLeaf {
             weight,
-            ips: [INIT_VEC; 4],
-            children: [None, None, None, None],
+            ips: [INIT_VEC; MAX_NUM_CHILDREN],
+            children: [INIT_CHILD; MAX_NUM_CHILDREN],
         }
     }
 
@@ -480,14 +481,17 @@ impl WeightTree {
                 ref mut children,
                 ..
             } => {
+                let mut found = false;
                 for c in 0..MAX_NUM_CHILDREN {
                     if ips[c].is_empty() {
                         ips[c] = child_ips;
                         children[c] = Some(Box::new(child));
+                        found = true;
                         break;
                     }
                 }
 
+                ensure!(found, "Too many children for non-leaf node.");
                 Ok(self)
             }
         }
@@ -576,8 +580,6 @@ impl WeightTree {
             min_quantum *= 500 / min_quantum;
         }
 
-        dbg!(min_quantum);
-
         self.into_flow_tree_with_quantum(min_quantum)
     }
 
@@ -599,33 +601,33 @@ impl WeightTree {
                     .sum();
                 ensure!(sum_weights > 0, "no children for non-leaf node");
 
-                let process_child = |ch: Option<Box<WeightTree>>| {
-                    if let Some(c) = ch {
-                        let wt = c.weight();
-                        // it is important that we multiply first before dividing by sum_weights,
-                        // since sum_weights might not be a divisor of quantum.
-                        let child_quantum = (wt * quantum) / sum_weights;
+                let process_child = |c: Box<WeightTree>, slot: &mut Box<FlowTree>| {
+                    let wt = c.weight();
+                    // it is important that we multiply first before dividing by sum_weights,
+                    // since sum_weights might not be a divisor of quantum.
+                    let child_quantum = (wt * quantum) / sum_weights;
 
-                        Ok::<_, Report>(Box::new(c.into_flow_tree_with_quantum(child_quantum)?))
-                    } else {
-                        Ok(Box::new(FlowTree::Leaf {
-                            quanta: 0,
-                            deficit: 0,
-                            curr_qlen: 0,
-                            queue: Default::default(),
-                        }))
-                    }
+                    let ft = c.into_flow_tree_with_quantum(child_quantum)?;
+                    let slot_ref = slot.as_mut();
+                    *slot_ref = ft;
+                    Ok::<_, Report>(())
                 };
 
-                dbg!(quantum, sum_weights);
-                let children = [
-                    process_child(children[0].take())?,
-                    process_child(children[1].take())?,
-                    process_child(children[2].take())?,
-                    process_child(children[3].take())?,
-                ];
+                let mut flow_children = [(); MAX_NUM_CHILDREN].map(|_| {
+                    Box::new(FlowTree::Leaf {
+                        quanta: 0,
+                        deficit: 0,
+                        curr_qlen: 0,
+                        queue: Default::default(),
+                    })
+                });
+                for i in 0..MAX_NUM_CHILDREN {
+                    if let Some(c) = children[i].take() {
+                        process_child(c, &mut flow_children[i])?;
+                    }
+                }
 
-                let sum_child_quanta: usize = children.iter().map(|c| c.quanta()).sum();
+                let sum_child_quanta: usize = flow_children.iter().map(|c| c.quanta()).sum();
                 assert_eq!(
                     sum_child_quanta, quantum,
                     "quantum did not divide evenly among children"
@@ -636,8 +638,8 @@ impl WeightTree {
                     deficit: 0,
                     curr_qlen: 0,
                     curr_child: 0,
-                    children,
-                    children_remaining_quanta: [0usize; 4],
+                    children: flow_children,
+                    children_remaining_quanta: [0usize; MAX_NUM_CHILDREN],
                     #[cfg(feature = "hwfq-audit")]
                     curr_audit_state: Default::default(),
                     #[cfg(feature = "hwfq-audit")]
