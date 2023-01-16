@@ -26,8 +26,11 @@ pub fn main() -> Result<(), Report> {
 
     fn msg(sk: &UnixDatagram, buf: &mut [u8], iface: &Iface) -> Result<(), Report> {
         let rlen = sk.recv(buf).wrap_err("uds recv")?;
+        if let Ok(p) = etherparse::PacketHeaders::from_ethernet_slice(&buf[..rlen]) {
+            tracing::trace!(?p, "forwarding packet");
+        }
+
         let msg = &mut buf[..rlen];
-        tracing::trace!(?msg, "got pkt");
         iface.send(msg)?;
         Ok(())
     }
