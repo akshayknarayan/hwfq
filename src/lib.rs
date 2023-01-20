@@ -64,7 +64,8 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
                 }
             };
 
-            trace!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "got packet");
+            debug!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "got packet");
+            trace!(?buf, "full packet");
 
             // TODO route to output ports based on ip header?
             // currently we assume only 1.
@@ -246,7 +247,7 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
 
                                 accum_tokens -= p.buf.len() as isize;
                                 let Pkt { ip_hdr, buf } = p;
-                                trace!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "forwarding packet");
+                                debug!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "forwarding packet");
                                 if let Err(e) = self.fwd.send(&buf) {
                                     debug!(?e, "fwd error");
                                 }

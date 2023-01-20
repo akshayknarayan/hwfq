@@ -20,14 +20,14 @@ pub fn main() -> Result<(), Report> {
     let opt = Opt::from_args();
 
     let iface = Iface::new(&opt.listen_interface, tun_tap::Mode::Tap)
-        .wrap_err("could not create TUN interface")?;
+        .wrap_err("could not create TAP interface")?;
     config_ip(iface.name())?;
     let sk = UnixDatagram::bind(&opt.packet_source).unwrap();
 
     fn msg(sk: &UnixDatagram, buf: &mut [u8], iface: &Iface) -> Result<(), Report> {
         let rlen = sk.recv(buf).wrap_err("uds recv")?;
         if let Ok(p) = etherparse::PacketHeaders::from_ethernet_slice(&buf[..rlen]) {
-            tracing::trace!(?p, "forwarding packet");
+            tracing::trace!(?p.ip, "forwarding packet");
         }
 
         let msg = &mut buf[..rlen];
