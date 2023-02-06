@@ -16,7 +16,6 @@ libc = "0.2"
 flume = "0.10"
 quanta = "0.9"
 yaml-rust = "0.4"
-num = "0.4"
 tracing = "0.1"
 color-eyre = "0.6"
 structopt = { version = "0.3", optional = true }

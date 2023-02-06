@@ -1,7 +1,6 @@
 use super::Scheduler;
 use crate::Pkt;
 use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
-use num::rational::Ratio;
 #[cfg(feature = "hwfq-audit")]
 use std::collections::HashMap;
 use std::collections::VecDeque;
