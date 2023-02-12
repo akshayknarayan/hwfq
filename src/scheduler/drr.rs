@@ -4,7 +4,7 @@ use color_eyre::eyre::{ensure, Report};
 use std::collections::{VecDeque, HashMap};
 
 // Define constant max number of queues.
-const MAX_QUEUES: usize = 100;
+const MAX_QUEUES: usize = 32;
 
 #[derive(Default)]
 pub struct Drr {
@@ -47,6 +47,7 @@ impl Scheduler for Drr {
         let flow_id = fnv(
             p.ip_hdr.source,
             p.ip_hdr.destination,
+            MAX_QUEUES as u64,
         );
         if self.queue_map.contains_key(&flow_id) {
             let queue_id = self.queue_map.get(&flow_id).unwrap();
