@@ -55,7 +55,7 @@ impl Scheduler for Drr {
             self.queues[*queue_id].push_back(p);
             return Ok(());
         } else {
-            assert !(self.num_queues >= MAX_QUEUES);
+            assert!(self.num_queues < MAX_QUEUES);
             self.queue_map.insert(flow_id, self.num_queues);
             self.num_queues += 1;
             let queue_id = self.queue_map.get(&flow_id).unwrap();
