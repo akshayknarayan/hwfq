@@ -1,15 +1,21 @@
 use super::{fnv, Scheduler};
 use crate::Pkt;
 use color_eyre::eyre::{ensure, Report};
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
+
+// Define constant max number of queues.
+const MAX_QUEUES: usize = 100;
 
 #[derive(Default)]
 pub struct Drr {
     limit_bytes: usize,
-    queues: [VecDeque<Pkt>; 8],
-    curr_qsizes: [usize; 8],
-    deficits: [usize; 8],
-    quanta: [usize; 8],
+    queues: [VecDeque<Pkt>; MAX_QUEUES],
+    curr_qsizes: [usize; MAX_QUEUES],
+    deficits: [usize; MAX_QUEUES],
+    quanta: [usize; MAX_QUEUES],
+
+    queue_map: HashMap<u8, usize>,
+    num_queues: usize,
 
     deq_curr_qid: usize,
 }
@@ -19,9 +25,11 @@ impl Drr {
         Self {
             limit_bytes,
             queues: Default::default(),
-            curr_qsizes: [0usize; 8],
-            deficits: [0usize; 8],
-            quanta: [500usize; 8],
+            curr_qsizes: [0usize; MAX_QUEUES],
+            deficits: [0usize; MAX_QUEUES],
+            quanta: [500usize; MAX_QUEUES],
+            queue_map: HashMap::new(),
+            num_queues: 0,
             deq_curr_qid: 0,
         }
     }
@@ -39,12 +47,21 @@ impl Scheduler for Drr {
         let flow_id = fnv(
             p.ip_hdr.source,
             p.ip_hdr.destination,
-            self.queues.len() as _,
         );
-        let queue_id = (flow_id % self.queues.len() as u8) as usize;
-        self.curr_qsizes[queue_id] += p.buf.len();
-        self.queues[queue_id].push_back(p);
-        Ok(())
+        if self.queue_map.contains_key(&flow_id) {
+            let queue_id = self.queue_map.get(&flow_id).unwrap();
+            self.curr_qsizes[*queue_id] += p.buf.len();
+            self.queues[*queue_id].push_back(p);
+            return Ok(());
+        } else {
+            assert !(self.num_queues >= MAX_QUEUES);
+            self.queue_map.insert(flow_id, self.num_queues);
+            self.num_queues += 1;
+            let queue_id = self.queue_map.get(&flow_id).unwrap();
+            self.curr_qsizes[*queue_id] += p.buf.len();
+            self.queues[*queue_id].push_back(p);
+            return Ok(());
+        }
     }
 
     fn deq(&mut self) -> Result<Option<Pkt>, Report> {
