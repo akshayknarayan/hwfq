@@ -214,6 +214,8 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
                                         let epoch_rate_bytes_per_sec = *bytes as f64 / el.as_secs_f64();
                                         let rate_mbps = epoch_rate_bytes_per_sec * 8. / 1e6;
                                         debug!(?accum_tokens, ?rate_mbps, ?el, "queue_empty");
+                                            
+                                        *epoch_start = clk.raw();
                                     }
                                 }
 
@@ -241,6 +243,8 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
                                             achieved_tx_rate = None;
 
                                             q.dbg();
+
+                                            *epoch_start = clk.raw();
                                         }
                                     }
                                 }
