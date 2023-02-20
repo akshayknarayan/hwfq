@@ -1,6 +1,7 @@
 use super::Pkt;
 use color_eyre::eyre::Report;
 
+/// Expose a pluggable scheduler implementation to [`crate::Datapath`].
 pub trait Scheduler {
     /// Enqueue a packet into the scheduler's queue.
     ///

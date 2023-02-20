@@ -6,6 +6,9 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use tracing::debug;
 
+/// Implement a hierarchical deficit round-robin [`Scheduler`].
+///
+/// See [`HierarchicalDeficitWeightedRoundRobin::new`].
 #[derive(Debug)]
 pub struct HierarchicalDeficitWeightedRoundRobin {
     limit_bytes: usize,
@@ -14,6 +17,14 @@ pub struct HierarchicalDeficitWeightedRoundRobin {
 }
 
 impl HierarchicalDeficitWeightedRoundRobin {
+    /// Construct a HDWRR scheduler.
+    ///
+    /// # Arguments
+    /// - `limit_bytes`: The *total size* of the queue.
+    /// - `lookup_on_src_ip`: Whether to use the source or destination IP address to match on the
+    /// weight tree. Using the source IP address (`true`) will schedule based on sender weights,
+    /// and using the destination IP address (`false`) will use receiver weights.
+    /// - `weight_tree`: The weight tree to classify packets with. See [`WeightTree`].
     pub fn new(
         limit_bytes: usize,
         lookup_on_src_ip: bool,
@@ -66,7 +77,7 @@ impl Scheduler for HierarchicalDeficitWeightedRoundRobin {
 
 const MAX_NUM_CHILDREN: usize = 8;
 
-pub enum FlowTree {
+enum FlowTree {
     Leaf {
         deficit: usize,
         quanta: usize,
@@ -304,6 +315,39 @@ impl FlowTree {
     }
 }
 
+/// A tree of weights and IP addresses to match them against.
+///
+/// This type is a *specification* of a weight tree. At runtime,
+/// `HierarchicalDeficitWeightedRoundRobin` will convert it to a tree of queues, which it uses to
+/// actually store packets.
+///
+/// See [`WeightTree::leaf`], [`WeightTree::parent`], [`WeightTree::add_child`], and
+/// [`WeightTree::from_str`]/[`WeightTree::from_file`] for how to construct one.
+///
+/// We enumerate all IP addresses to match rather than using prefixes, so that we can run
+/// experiments with randomly assigned IPs.
+///
+/// # Example
+/// ```rust
+/// let all_ips = [
+///     u32::from_be_bytes([10, 0, 0, 0]),
+///     u32::from_be_bytes([10, 1, 1, 1]),
+///     u32::from_be_bytes([10, 1, 2, 1]),
+/// ];
+/// WeightTree::parent(1)
+///     .add_child(vec![all_ips[0]], WeightTree::leaf(1))
+///     .expect("This call cannot fail, since the sub-tree is depth 1")
+///     .add_child(
+///         all_ips[1..].to_vec(),
+///         WeightTree::parent(2)
+///             .add_child(vec![all_ips[1]], WeightTree::leaf(1))
+///             .unwrap() // sub-tree of depth 1
+///             .add_child(vec![all_ips[2]], WeightTree::leaf(2))
+///             .unwrap(), // sub-tree of depth 1
+///     )
+///     .expect("We check here that the IP addresses passed to add_child match the full set in the
+///     sub-tree.");
+/// ```
 #[derive(Clone, Debug)]
 pub enum WeightTree {
     Leaf {
@@ -460,6 +504,7 @@ impl WeightTree {
         }
     }
 
+    /// Add a child to the weight tree which matches the IP addresses `child_ips`.
     pub fn add_child(mut self, mut child_ips: Vec<u32>, child: Self) -> Result<Self, Report> {
         if let WeightTree::NonLeaf { .. } = &child {
             child_ips.sort();

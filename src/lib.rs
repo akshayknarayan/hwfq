@@ -1,3 +1,19 @@
+//! Paced user-space TUN/TAP-based packet scheduler.
+//!
+//! This crate implements user-space packet scheduling via a TUN/TAP device. The primary motivation
+//! is to provide an implementation of Hierarchical Deficit Weighted Round Robin, which is in
+//! [`scheduler::HierarchicalDeficitWeightedRoundRobin`].
+//!
+//! To achieve this, we need:
+//! - A packet pacer, which accepts a pacing rate. We thus emulate a zero-latency link with the
+//! given pacing rate. The implementation uses a token-bucket-style approach.
+//! - A scheduler ([`scheduler::Scheduler`]), which schedules the resulting queue.
+//!
+//! The entry point for this functionality is [`Datapath`]. Packets flow into the TUN/TAP device
+//! that [`Datapath`] manages, and it forwards packets to a named Unix pipe. This pipe must exist
+//! and handle packets; if it does not exist, [`Datapath::new`] will error, but if it black-holes
+//! packets [`Datapath`] will not complain.
+
 use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
 use std::process::Command;
 use tracing::{debug, info, trace};
@@ -9,12 +25,22 @@ pub use ip_socket::IpIfaceSocket;
 pub mod scheduler;
 use scheduler::Scheduler;
 
+/// Manage pacing, scheduling (via the parameter), and forwarding packets to a Unix pipe.
+///
+/// We use a TAP device, and we only queue IPv4 packets. Other packets bypass the queue and go
+/// straight to the Unix pipe.
 pub struct Datapath<S: Scheduler> {
     iface: Iface,
     out_port: OutputPort<S>,
 }
 
 impl<S: Scheduler + Send + 'static> Datapath<S> {
+    /// Initialize the TAP device using the interface name `listen_iface`.
+    /// We will forward packets to the Unix pipe at `fwd_iface`, and pace packets at the rate
+    /// `tx_rate_bytes_per_sec`. If `tx_rate_bytes_per_sec` is `None`, we will not apply pacing and
+    /// simply forward packets. Note that in most cases, this will make the scheduling useless
+    /// because there will be no queue to schedule. The scheduler `sch` should implement the
+    /// [`Scheduler`] trait.
     pub fn new(
         listen_iface: &str,
         fwd_iface: &str,
@@ -37,6 +63,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
         Ok(())
     }
 
+    /// Start the datapath.
     #[tracing::instrument(level = "info", skip(self), err)]
     pub fn run(self) -> Result<(), Report> {
         info!(iface=?self.iface.name(), "starting");
@@ -79,10 +106,29 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
     }
 }
 
+/// A packet buffer.
+///
+/// This type is only exposed so that [`Scheduler`] implementations have something to store. The
+/// raw fields are deliberately not exposed. Instead we provide read-access to the header
+/// ([`Pkt::hdr`]) and to the packet's length ([`Pkt::len`]).
+///
+/// # Implementation Details
+/// The buffer `buf` includes the header, but we also store the parsed IPv4 header in `ip_hdr` for
+/// convenience.
 #[derive(Clone, Debug)]
 pub struct Pkt {
     ip_hdr: etherparse::Ipv4Header,
     buf: Vec<u8>,
+}
+
+impl Pkt {
+    pub fn hdr(&self) -> &etherparse::Ipv4Header {
+        &self.ip_hdr
+    }
+
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
 }
 
 struct Rate {
