@@ -19,6 +19,8 @@ pub trait Scheduler {
     fn dbg(&self) {}
 }
 
+pub mod common;
+
 mod fifo;
 pub use fifo::Fifo;
 
@@ -26,7 +28,7 @@ mod drr;
 pub use drr::Drr;
 
 mod hdwrr;
-pub use hdwrr::{HierarchicalDeficitWeightedRoundRobin, WeightTree};
+pub use hdwrr::HierarchicalDeficitWeightedRoundRobin;
 
 fn fnv(src: [u8; 4], dst: [u8; 4], queues: u64) -> u8 {
     const FNV1_64_INIT: u64 = 0xcbf29ce484222325u64;
