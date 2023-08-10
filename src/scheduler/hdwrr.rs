@@ -675,7 +675,7 @@ root:
                         None,
                     ],
                     ..
-                } if matches!(&*l1, &WeightTree::Leaf { weight: 1 }) &&
+                } if matches!(&*l1, &WeightTree::Leaf { weight: 1, ..}) &&
                      matches!(&*l2, &WeightTree::NonLeaf {
                             weight: 2,
                             children: [
@@ -689,8 +689,8 @@ root:
                                 None,
                             ],
                             ..
-                    } if matches!(&**l3, WeightTree::Leaf { weight: 1 }) &&
-                         matches!(&**l4, WeightTree::Leaf { weight: 2 })
+                    } if matches!(&**l3, WeightTree::Leaf { weight: 1, ..}) &&
+                         matches!(&**l4, WeightTree::Leaf { weight: 2, ..})
                     )
             ),
             "wrong weighttree"

@@ -38,6 +38,7 @@ pub const MAX_NUM_CHILDREN: usize = 8;
 pub enum WeightTree {
     Leaf {
         weight: usize,
+        ips: Vec<u32>,
     },
     NonLeaf {
         weight: usize,
@@ -147,7 +148,11 @@ impl WeightTree {
     }
 
     pub fn leaf(weight: usize) -> Self {
-        WeightTree::Leaf { weight }
+        const INIT_VEC: Vec<u32> = Vec::new();
+        WeightTree::Leaf {
+            weight: weight,
+            ips: INIT_VEC,
+        }
     }
 
     pub fn parent(weight: usize) -> Self {
@@ -233,7 +238,7 @@ impl WeightTree {
 
     pub fn weight(&self) -> usize {
         match self {
-            WeightTree::NonLeaf { weight, .. } | WeightTree::Leaf { weight } => *weight,
+            WeightTree::NonLeaf { weight, .. } | WeightTree::Leaf { weight, ..} => *weight,
         }
     }
 }
