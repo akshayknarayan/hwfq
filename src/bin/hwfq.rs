@@ -29,6 +29,9 @@ struct Opt {
 
     #[structopt(short, long, required_if("scheduler", "hwfq"))]
     weights_cfg: Option<std::path::PathBuf>,
+
+    #[structopt(long, default_value = "0.01")]
+    sample_prob: f64,
 }
 
 pub fn main() -> Result<(), Report> {
@@ -85,6 +88,25 @@ pub fn main() -> Result<(), Report> {
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
                 ),
                 hwfq,
+            )?;
+            s.run().unwrap();
+        }
+        "hafd" => {
+            let cfg = opt.weights_cfg.unwrap();
+            let wt = WeightTree::from_file(&cfg);
+            let hafd = HierarchicalApproximateFairDropping::new(
+                opt.sample_prob,
+                wt?,
+                opt.queue_size_bytes,
+            )?;
+            let s = Datapath::new(
+                &opt.listen_interface,
+                &opt.fwd_address,
+                Some(
+                    opt.rate_bytes_per_sec
+                        .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
+                ),
+                hafd,
             )?;
             s.run().unwrap();
         }

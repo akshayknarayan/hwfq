@@ -30,6 +30,9 @@ pub use drr::Drr;
 mod hdwrr;
 pub use hdwrr::HierarchicalDeficitWeightedRoundRobin;
 
+mod hafd;
+pub use hafd::HierarchicalApproximateFairDropping;
+
 fn fnv(src: [u8; 4], dst: [u8; 4], queues: u64) -> u8 {
     const FNV1_64_INIT: u64 = 0xcbf29ce484222325u64;
     const FNV_64_PRIME: u64 = 0x100000001b3u64;
