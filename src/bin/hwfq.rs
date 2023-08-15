@@ -97,7 +97,7 @@ pub fn main() -> Result<(), Report> {
             let hafd = HierarchicalApproximateFairDropping::new(
                 opt.sample_prob,
                 wt?,
-                opt.queue_size_bytes,
+                opt.rate_bytes_per_sec,
             )?;
             let s = Datapath::new(
                 &opt.listen_interface,
