@@ -123,8 +123,9 @@ pub struct HierarchicalApproximateFairDropping {
     /// Maps from a single IP to the list of aggregates it belongs to, from root to leaf.
     ip_to_aggregates: HashMap<u32, Vec<String>>,
     shadow_buffer: ShadowBuffer,
-    aggregate_to_last_update: HashMap<String, SystemTime>,
     capacity_in_bytes: usize,
+    ingress_rate : f64,
+    last_time_update: SystemTime,
     inner: VecDeque<Pkt>,
 }
 
@@ -209,10 +210,18 @@ impl HierarchicalApproximateFairDropping {
             aggregate_to_siblings,
             ip_to_aggregates,
             shadow_buffer,
-            aggregate_to_last_update: HashMap::new(),
             capacity_in_bytes,
+            ingress_rate: 0.0,
+            last_time_update: SystemTime::now(),
             inner: Default::default(),
         }
+    }
+
+    fn update_ingress_rate(&mut self, pkt: &Pkt) {
+        let time_since_last_update = SystemTime::now().duration_since(self.last_time_update).unwrap().as_secs_f64();
+        let packet_len = pkt.len() as f64;
+        self.ingress_rate = (1.0 - f64::powf(E, -time_since_last_update / K)) * (packet_len / time_since_last_update) + f64::powf(E, -time_since_last_update / K) * self.ingress_rate;
+        self.last_time_update = SystemTime::now();
     }
 
     fn update_fair_rate(&mut self, pkt: &Pkt) {
@@ -247,44 +256,15 @@ impl HierarchicalApproximateFairDropping {
         total_rate
     }
 
-    /// Gets the full ingress rate of the queue.
-    fn get_total_queue_rate(&mut self) -> f64 {
-        let mut total_rate = 0.0;
-        for aggregate in self.aggregate_to_rate.keys() {
-            total_rate += self.aggregate_to_rate.get(aggregate).expect(format!("Failed to get rate for aggregate: {}", aggregate).as_str()).clone();
-        }
-        total_rate
-    }
-
     fn update_rate(&mut self, pkt: &Pkt) {
         let aggregates = get_aggregates(&pkt, &self.ip_to_aggregates);
         for aggregate in aggregates {
             if !self.is_active(&aggregate) {
                 continue;
             }
-            if !self.aggregate_to_rate.contains_key(&aggregate) {
-                if !self.aggregate_to_last_update.contains_key(&aggregate) {
-                    self.aggregate_to_last_update.insert(aggregate.clone(), SystemTime::now());
-                } else {
-                    let time_since_last_update = SystemTime::now().duration_since(self.aggregate_to_last_update[&aggregate]).unwrap().as_secs_f64();
-                    let packet_len = pkt.len() as f64;
-                    self.aggregate_to_rate.insert(aggregate.clone(), packet_len / time_since_last_update);
-                    self.aggregate_to_last_update.insert(aggregate.clone(), SystemTime::now());
-                }
-                continue;
-            }
-            let last_update = self.aggregate_to_last_update[&aggregate];
-            let time_since_last_update = SystemTime::now().duration_since(last_update).unwrap().as_secs_f64();
             let occupancy = self.shadow_buffer.aggregate_occupancy.get(&aggregate).expect(format!("Failed to get aggregate occupancy for aggregate: {}", aggregate).as_str()).clone() as f64;
-            let total_ingress_rate = self.get_total_queue_rate();
-            let current_rate = (occupancy / self.shadow_buffer.get_total_packets() as f64) * total_ingress_rate;
-            // let packet_len = pkt.len() as f64;
-            // debug!("Packet len: {}", packet_len);
-            // debug!("Time since last update: {}", time_since_last_update);
-            debug!("New rate: {} old rate: {}", current_rate, self.aggregate_to_rate[&aggregate]);
-            self.aggregate_to_rate.insert(aggregate.clone(), (1.0 - f64::powf(E, -time_since_last_update / K)) * (current_rate) + f64::powf(E, -time_since_last_update / K) * self.aggregate_to_rate[&aggregate]);
-            debug!("Aggregate: {} chosen rate: {}", aggregate, self.aggregate_to_rate[&aggregate]);
-            self.aggregate_to_last_update.insert(aggregate.clone(), SystemTime::now());
+            let new_rate = occupancy / self.shadow_buffer.get_total_packets() as f64 * self.ingress_rate;
+            self.aggregate_to_rate.insert(aggregate.clone(), new_rate);
         }
     }
 
@@ -313,8 +293,6 @@ impl HierarchicalApproximateFairDropping {
                 !self.aggregate_to_weight.contains_key(&aggregate) {
                 continue;
             }
-            let weight = self.aggregate_to_weight.get(&aggregate).expect(format!("Failed to get weight for aggregate: {}", aggregate).as_str()).clone();
-            let total_weight = self.get_total_active_weight(&aggregate);
             let fair_rate = self.aggregate_to_fair_rate.get(&aggregate).expect(format!("Failed to get fair rate for aggregate: {}", aggregate).as_str()).clone();
             let rate = self.aggregate_to_rate.get(&aggregate).expect(format!("Failed to get rate for aggregate: {}", aggregate).as_str()).clone();
             let drop_prob = 1.0 - 
@@ -333,6 +311,7 @@ impl Scheduler for HierarchicalApproximateFairDropping {
         if let Err(e) = res {
             return Err(e);
         }
+        self.update_ingress_rate(&p);
         self.update_rate(&p);
         self.update_fair_rate(&p);
 
