@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use std::f64::consts::E;
 
 // TODO: What is a good K?
-const K : f64 = 0.1;
+const K : f64 = 0.0001;
 
 const STARTING_RATE_IN_BYTES : f64 = 5000.0;
 
@@ -32,8 +32,10 @@ fn get_aggregates(packet: &Pkt, ip_to_aggregates: &HashMap<u32, Vec<String>>) ->
         src_ip[0], src_ip[1], src_ip[2], src_ip[3]
     );
 
-    let parsed_ip = parse_ip(new_src_ip.as_str()).unwrap();
-    ip_to_aggregates.get(&parsed_ip).unwrap().clone()
+    debug!("New src ip: {}", new_src_ip);
+
+    let parsed_ip = parse_ip(new_src_ip.as_str()).expect("Failed to parse IP");
+    ip_to_aggregates.get(&parsed_ip).expect("Failed to get aggregates from IP").clone()
 }
 #[derive(Debug)]
 pub struct ShadowBuffer {
@@ -99,6 +101,11 @@ impl ShadowBuffer {
         }
     }
 
+    /// Gets the total number of packets in the shadow buffer.
+    pub fn get_total_packets(&self) -> usize {
+        self.inner.len()
+    }
+
     fn dbg(&self) {
         debug!(?self.inner);
     }
@@ -134,9 +141,13 @@ impl HierarchicalApproximateFairDropping {
 
         // Form the weight map from the tree.
         fn weight_tree_helper(tree: WeightTree, weight_map: &mut HashMap<String, f64>,
-                                ip_to_aggregates: &mut HashMap<u32, Vec<String>>, aggregate_to_siblings: &mut HashMap<String, Vec<String>>) {
+                                ip_to_aggregates: &mut HashMap<u32, Vec<String>>, aggregate_to_siblings: &mut HashMap<String, Vec<String>>, set_ips: Option<Vec<u32>>) {
             match tree {
-                WeightTree::Leaf { weight, ips} => {
+                WeightTree::Leaf { weight, ..} => {
+                    let ips = set_ips.unwrap();
+                    // Print out the ips.
+                    debug!("IPS: {:?}", ips);
+                    debug!("Weight: {}", weight);
                     let ip_array = [ips.clone()];
                     let agg = ip_set_to_agg_name(&ip_array);
                     let aggs = vec![agg.clone()];
@@ -145,9 +156,12 @@ impl HierarchicalApproximateFairDropping {
                     aggregate_to_siblings.insert(agg, vec![]);
                 }
                 WeightTree::NonLeaf { weight, ips, children} => {
+                    // Print out the ips.
+                    debug!("IPS: {:?}", ips);
+                    debug!("Weight: {}", weight);
                     let agg = ip_set_to_agg_name(&ips);
                     weight_map.insert(agg.clone(), weight as f64);
-                    for ip_vec in ips {
+                    for ip_vec in ips.clone() {
                         for ip in ip_vec {
                             if !ip_to_aggregates.contains_key(&ip.clone()) {
                                 ip_to_aggregates.insert(ip, vec![]);
@@ -156,9 +170,11 @@ impl HierarchicalApproximateFairDropping {
                         }
                     }
                     let mut children_aggregates = vec![];
-                    for child in children {
+                    for i in 0..children.len() {
+                        let child = children.get(i).unwrap();
+                        let ips = ips[i].clone();
                         if let Some(child) = child {
-                            weight_tree_helper(*child.clone(), weight_map, ip_to_aggregates, aggregate_to_siblings);
+                            weight_tree_helper(*child.clone(), weight_map, ip_to_aggregates, aggregate_to_siblings, Some(ips.clone()));
                             let new_child = child.clone();
                             match new_child.as_ref() {
                                 WeightTree::Leaf { weight: _, ips} => {
@@ -180,9 +196,11 @@ impl HierarchicalApproximateFairDropping {
                 }
             }
         }
-        weight_tree_helper(tree, &mut weight_map, &mut ip_to_aggregates, &mut aggregate_to_siblings);
+        weight_tree_helper(tree, &mut weight_map, &mut ip_to_aggregates, &mut aggregate_to_siblings, None);
 
         let shadow_buffer = ShadowBuffer::new(packet_sample_prob, MAX_PACKETS, ip_to_aggregates.clone());
+
+        debug!("Capacity in bytes: {}", capacity_in_bytes);
 
         Self {
             aggregate_to_rate: HashMap::new(),
@@ -198,31 +216,42 @@ impl HierarchicalApproximateFairDropping {
     }
 
     fn update_fair_rate(&mut self, pkt: &Pkt) {
+        debug!("Updating fair rate");
         let aggregates = get_aggregates(pkt, &self.ip_to_aggregates);
         let mut capacity = self.capacity_in_bytes as f64;
 
         // Update the fair rate for each aggregate.
         for aggregate in aggregates {
-            if !self.is_active(&aggregate) {
+            if !self.is_active(&aggregate) || !self.aggregate_to_rate.contains_key(&aggregate) {
                 continue;
             }
-            let total_rate = self.get_total_rate(&aggregate);
             if !self.aggregate_to_fair_rate.contains_key(&aggregate) {
                 self.aggregate_to_fair_rate.insert(aggregate.clone(), STARTING_RATE_IN_BYTES);
             }
-            let old_fair_rate = self.aggregate_to_fair_rate[&aggregate] as f64;
-            let fair_rate = old_fair_rate * (self.aggregate_to_weight[&aggregate] / self.get_total_active_weight(&aggregate)) * capacity / total_rate;
+            let total_rate = self.get_total_rate(&aggregate);
+            let old_fair_rate = self.aggregate_to_fair_rate.get(&aggregate).expect(format!("Failed to get fair rate for aggregate: {}", aggregate).as_str()).clone();
+            let fair_rate = old_fair_rate * (self.aggregate_to_weight.get(&aggregate).expect(format!("Failed to get weight for aggregate: {}", aggregate).as_str()).clone() / self.get_total_active_weight(&aggregate)) * capacity / total_rate;
             self.aggregate_to_fair_rate.insert(aggregate.clone(), fair_rate);
+            debug!("Aggregate: {} new fair rate: {}", aggregate, fair_rate);
             capacity = fair_rate;
         }
     }
 
     /// Gets the full rate of the aggregate and its siblings in the tree.
     fn get_total_rate(&mut self, agg: &String) -> f64 {
-        let mut total_rate = self.aggregate_to_rate[agg];
-        let siblings = self.aggregate_to_siblings[agg].clone();
+        let mut total_rate = self.aggregate_to_rate.get(agg).expect(format!("Failed to get rate for aggregate: {}", agg).as_str()).clone();
+        let siblings = self.aggregate_to_siblings.get(agg).expect(format!("Failed to get siblings for aggregate: {}", agg).as_str()).clone();
         for sibling in siblings {
-            total_rate += self.aggregate_to_rate[&sibling];
+            total_rate += self.aggregate_to_rate.get(&sibling).expect(format!("Failed to get rate for sibling aggregate: {}", sibling).as_str()).clone();
+        }
+        total_rate
+    }
+
+    /// Gets the full ingress rate of the queue.
+    fn get_total_queue_rate(&mut self) -> f64 {
+        let mut total_rate = 0.0;
+        for aggregate in self.aggregate_to_rate.keys() {
+            total_rate += self.aggregate_to_rate.get(aggregate).expect(format!("Failed to get rate for aggregate: {}", aggregate).as_str()).clone();
         }
         total_rate
     }
@@ -234,14 +263,27 @@ impl HierarchicalApproximateFairDropping {
                 continue;
             }
             if !self.aggregate_to_rate.contains_key(&aggregate) {
-                self.aggregate_to_rate.insert(aggregate.clone(), STARTING_RATE_IN_BYTES);
-                self.aggregate_to_last_update.insert(aggregate.clone(), SystemTime::now());
+                if !self.aggregate_to_last_update.contains_key(&aggregate) {
+                    self.aggregate_to_last_update.insert(aggregate.clone(), SystemTime::now());
+                } else {
+                    let time_since_last_update = SystemTime::now().duration_since(self.aggregate_to_last_update[&aggregate]).unwrap().as_secs_f64();
+                    let packet_len = pkt.len() as f64;
+                    self.aggregate_to_rate.insert(aggregate.clone(), packet_len / time_since_last_update);
+                    self.aggregate_to_last_update.insert(aggregate.clone(), SystemTime::now());
+                }
                 continue;
             }
             let last_update = self.aggregate_to_last_update[&aggregate];
-            let time_since_last_update = SystemTime::now().duration_since(last_update).unwrap().as_secs() as f64;
-            let packet_len = pkt.len() as f64;
-            self.aggregate_to_rate.insert(aggregate.clone(), (1.0 - f64::powf(E, time_since_last_update / K)) * (packet_len / time_since_last_update) + f64::powf(E, time_since_last_update / K) * self.aggregate_to_rate[&aggregate]);
+            let time_since_last_update = SystemTime::now().duration_since(last_update).unwrap().as_secs_f64();
+            let occupancy = self.shadow_buffer.aggregate_occupancy.get(&aggregate).expect(format!("Failed to get aggregate occupancy for aggregate: {}", aggregate).as_str()).clone() as f64;
+            let total_ingress_rate = self.get_total_queue_rate();
+            let current_rate = (occupancy / self.shadow_buffer.get_total_packets() as f64) * total_ingress_rate;
+            // let packet_len = pkt.len() as f64;
+            // debug!("Packet len: {}", packet_len);
+            // debug!("Time since last update: {}", time_since_last_update);
+            debug!("New rate: {} old rate: {}", current_rate, self.aggregate_to_rate[&aggregate]);
+            self.aggregate_to_rate.insert(aggregate.clone(), (1.0 - f64::powf(E, -time_since_last_update / K)) * (current_rate) + f64::powf(E, -time_since_last_update / K) * self.aggregate_to_rate[&aggregate]);
+            debug!("Aggregate: {} chosen rate: {}", aggregate, self.aggregate_to_rate[&aggregate]);
             self.aggregate_to_last_update.insert(aggregate.clone(), SystemTime::now());
         }
     }
@@ -252,10 +294,10 @@ impl HierarchicalApproximateFairDropping {
 
     // Gets the total weight of the aggregate and its siblings in the tree. Ignores non-active aggregates.
     fn get_total_active_weight(&mut self, agg: &String) -> f64 {
-        let mut total_weight : f64 = self.aggregate_to_weight[agg] as f64;
-        for sibling in self.aggregate_to_siblings[agg].clone() {
+        let mut total_weight : f64 = self.aggregate_to_weight.get(agg).expect(format!("Failed to get weight for aggregate: {}", agg).as_str()).clone() as f64;
+        for sibling in self.aggregate_to_siblings.get(agg).expect(format!("Failed to get siblings for aggregate: {}", agg).as_str()).clone() {
             if self.is_active(&sibling) {
-                total_weight += self.aggregate_to_weight[&sibling] as f64;
+                total_weight += self.aggregate_to_weight.get(&sibling).expect(format!("Failed to get weight for sibling aggregate: {}", sibling).as_str());
             }
         }
         total_weight
@@ -264,13 +306,19 @@ impl HierarchicalApproximateFairDropping {
     fn should_drop(&mut self, p: &Pkt) -> bool {
         let aggregates = get_aggregates(&p, &self.ip_to_aggregates);
         for aggregate in aggregates {
-            if !self.shadow_buffer.aggregate_occupancy.contains_key(&aggregate) ||
+            if !self.is_active(&aggregate) ||
+                !self.shadow_buffer.aggregate_occupancy.contains_key(&aggregate) ||
                 !self.aggregate_to_fair_rate.contains_key(&aggregate) || 
+                !self.aggregate_to_rate.contains_key(&aggregate) ||
                 !self.aggregate_to_weight.contains_key(&aggregate) {
                 continue;
             }
-            let drop_prob = 1.0 - (self.aggregate_to_weight[&aggregate] / self.get_total_active_weight(&aggregate)) *
-                                (self.aggregate_to_fair_rate[&aggregate] / self.aggregate_to_rate[&aggregate]);
+            let weight = self.aggregate_to_weight.get(&aggregate).expect(format!("Failed to get weight for aggregate: {}", aggregate).as_str()).clone();
+            let total_weight = self.get_total_active_weight(&aggregate);
+            let fair_rate = self.aggregate_to_fair_rate.get(&aggregate).expect(format!("Failed to get fair rate for aggregate: {}", aggregate).as_str()).clone();
+            let rate = self.aggregate_to_rate.get(&aggregate).expect(format!("Failed to get rate for aggregate: {}", aggregate).as_str()).clone();
+            let drop_prob = 1.0 - 
+                                (fair_rate / rate);
             if rand::random::<f64>() < drop_prob {
                 return true;
             }
@@ -289,6 +337,7 @@ impl Scheduler for HierarchicalApproximateFairDropping {
         self.update_fair_rate(&p);
 
         if self.should_drop(&p) {
+            debug!("Dropping packet: {:?}", p);
             return Ok(());
         }
         self.inner.push_back(p.clone());

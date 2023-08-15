@@ -2,7 +2,8 @@ use color_eyre::{
     eyre::{eyre, Report},
     Help,
 };
-use hwfq::scheduler::{Drr, Fifo, HierarchicalDeficitWeightedRoundRobin, WeightTree};
+use hwfq::scheduler::{Drr, Fifo, HierarchicalDeficitWeightedRoundRobin, HierarchicalApproximateFairDropping};
+use hwfq::scheduler::common::WeightTree;
 use hwfq::Datapath;
 use structopt::StructOpt;
 
@@ -97,8 +98,8 @@ pub fn main() -> Result<(), Report> {
             let hafd = HierarchicalApproximateFairDropping::new(
                 opt.sample_prob,
                 wt?,
-                opt.rate_bytes_per_sec,
-            )?;
+                opt.rate_bytes_per_sec.ok_or(eyre!("BW Capacity is required to use scheduler"))?,
+            );
             let s = Datapath::new(
                 &opt.listen_interface,
                 &opt.fwd_address,
