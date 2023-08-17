@@ -271,17 +271,18 @@ impl HierarchicalApproximateFairDropping {
             debug!("    Capacity: {}", capacity);
             debug!("    Total weight: {}", self.get_total_active_weight(&aggregate));
             debug!("    Weight: {}", self.aggregate_to_weight.get(&aggregate).expect(format!("Failed to get weight for aggregate: {}", aggregate).as_str()).clone());
-            let mut fair_rate = old_fair_rate * (self.aggregate_to_weight.get(&aggregate).expect(format!("Failed to get weight for aggregate: {}", aggregate).as_str()).clone() / self.get_total_active_weight(&aggregate)) * capacity / total_rate;
-            let mut num_siblings = self.aggregate_to_siblings.get(&aggregate).expect(format!("Failed to get siblings for aggregate: {}", aggregate).as_str()).len() as f64;
-            if num_siblings < 1.0 {
-                num_siblings = 1.0;
-            }
-            if fair_rate > 10.0 * num_siblings * capacity {
-                fair_rate = 10.0 * num_siblings * capacity;
-            }
-            if fair_rate < capacity / (10.0 * num_siblings) {
-                fair_rate = capacity / (10.0 * num_siblings);
-            }
+            let fair_rate = old_fair_rate * (self.aggregate_to_weight.get(&aggregate).expect(format!("Failed to get weight for aggregate: {}", aggregate).as_str()).clone() / self.get_total_active_weight(&aggregate)) * capacity / total_rate;
+            // Value clamping code.
+            // let mut num_siblings = self.aggregate_to_siblings.get(&aggregate).expect(format!("Failed to get siblings for aggregate: {}", aggregate).as_str()).len() as f64;
+            // if num_siblings < 1.0 {
+            //     num_siblings = 1.0;
+            // }
+            // if fair_rate > 10.0 * num_siblings * capacity {
+            //     fair_rate = 10.0 * num_siblings * capacity;
+            // }
+            // if fair_rate < capacity / (10.0 * num_siblings) {
+            //     fair_rate = capacity / (10.0 * num_siblings);
+            // }
             self.aggregate_to_fair_rate.insert(aggregate.clone(), fair_rate.clone());
             debug!("    New fair rate: {}", fair_rate);
             capacity = fair_rate;
