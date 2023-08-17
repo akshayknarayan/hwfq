@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use std::f64::consts::E;
 
 // TODO: What is a good K?
-const K : f64 = 0.0001;
+const K : f64 = 0.1;
 
 const STARTING_RATE_IN_BYTES : f64 = 5000.0;
 
@@ -21,6 +21,10 @@ fn ip_set_to_agg_name(ips: &[Vec<u32>]) -> String {
     let mut new_ips = ips.clone().to_vec();
     new_ips.sort();
     new_ips.iter().map(|ip| ip.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(".")).collect::<Vec<String>>().join("_")
+}
+
+fn exponential_smooth(old_value: f64, new_value: f64, time_since: f64, k: f64) -> f64 {
+    (1.0 - f64::powf(E, -time_since / k)) * new_value + f64::powf(E, -time_since / k) * old_value
 }
 
 fn get_aggregates(packet: &Pkt, ip_to_aggregates: &HashMap<u32, Vec<String>>) -> Vec<String> {
@@ -63,9 +67,10 @@ impl ShadowBuffer {
     }
 
     pub fn sample(&mut self, p: &Pkt) -> Result<(), Report> {
-        if rand::random::<f64>() < self.packet_sample_prob {
-            self.enq(p.clone())?;
-        }
+        // if rand::random::<f64>() < self.packet_sample_prob {
+        //     self.enq(p.clone())?;
+        // }
+        self.enq(p.clone())?;
         Ok(())
     }
 
@@ -142,7 +147,7 @@ impl HierarchicalApproximateFairDropping {
 
         // Form the weight map from the tree.
         fn weight_tree_helper(tree: WeightTree, weight_map: &mut HashMap<String, f64>,
-                                ip_to_aggregates: &mut HashMap<u32, Vec<String>>, aggregate_to_siblings: &mut HashMap<String, Vec<String>>, set_ips: Option<Vec<u32>>) {
+                                ip_to_aggregates: &mut HashMap<u32, Vec<String>>, aggregate_to_siblings: &mut HashMap<String, Vec<String>>, set_ips: Option<Vec<u32>>, aggregates: &Vec<String>) {
             match tree {
                 WeightTree::Leaf { weight, ..} => {
                     let ips = set_ips.unwrap();
@@ -151,45 +156,48 @@ impl HierarchicalApproximateFairDropping {
                     debug!("Weight: {}", weight);
                     let ip_array = [ips.clone()];
                     let agg = ip_set_to_agg_name(&ip_array);
-                    let aggs = vec![agg.clone()];
-                    ip_to_aggregates.insert(ips[0], aggs.clone());
+                    let mut all_aggs = aggregates.clone();
+                    all_aggs.push(agg.clone());
                     weight_map.insert(agg.clone(), weight as f64);
-                    aggregate_to_siblings.insert(agg, vec![]);
+                    ip_to_aggregates.insert(ips[0], all_aggs.clone());
+                    // aggregate_to_siblings.insert(agg, vec![]);
                 }
                 WeightTree::NonLeaf { weight, ips, children} => {
                     // Print out the ips.
                     debug!("IPS: {:?}", ips);
                     debug!("Weight: {}", weight);
                     let agg = ip_set_to_agg_name(&ips);
-                    weight_map.insert(agg.clone(), weight as f64);
-                    for ip_vec in ips.clone() {
-                        for ip in ip_vec {
-                            if !ip_to_aggregates.contains_key(&ip.clone()) {
-                                ip_to_aggregates.insert(ip, vec![]);
-                            } 
-                            ip_to_aggregates.get_mut(&ip).unwrap().push(agg.clone());
-                        }
+                    if !aggregate_to_siblings.contains_key(&agg) {
+                        aggregate_to_siblings.insert(agg.clone(), vec![]);
                     }
+                    weight_map.insert(agg.clone(), weight as f64);
                     let mut children_aggregates = vec![];
                     for i in 0..children.len() {
+                        let mut all_aggs = aggregates.clone();
+                        all_aggs.push(agg.clone());
                         let child = children.get(i).unwrap();
-                        let ips = ips[i].clone();
+                        let child_ips = ips[i].clone();
                         if let Some(child) = child {
-                            weight_tree_helper(*child.clone(), weight_map, ip_to_aggregates, aggregate_to_siblings, Some(ips.clone()));
+                            weight_tree_helper(*child.clone(), weight_map, ip_to_aggregates, aggregate_to_siblings, Some(child_ips.clone()), &all_aggs);
                             let new_child = child.clone();
+                            debug!("Matching child");
                             match new_child.as_ref() {
-                                WeightTree::Leaf { weight: _, ips} => {
-                                    let ip_array = [ips.clone()];
+                                WeightTree::Leaf { weight: _, ips: _} => {
+                                    debug!("Matched as leaf");
+                                    let ip_array = [child_ips.clone()];
                                     let agg = ip_set_to_agg_name(&ip_array);
                                     children_aggregates.push(agg);
                                 }
-                                WeightTree::NonLeaf { weight: _, ips, children: _} => {
-                                    let agg = ip_set_to_agg_name(ips);
+                                WeightTree::NonLeaf { weight: _, ips: _, children: _} => {
+                                    debug!("Matched as non leaf");
+                                    let ip_array = [child_ips.clone()];
+                                    let agg = ip_set_to_agg_name(&ip_array);
                                     children_aggregates.push(agg);
                                 }
                             }
                         }
                     }
+                    debug!("Child aggregates: {:?}", children_aggregates);
                     for child_agg in children_aggregates.clone() {
                         let siblings = children_aggregates.clone().into_iter().filter(|x| x != &child_agg).collect::<Vec<String>>();
                         aggregate_to_siblings.insert(child_agg, siblings);
@@ -197,7 +205,24 @@ impl HierarchicalApproximateFairDropping {
                 }
             }
         }
-        weight_tree_helper(tree, &mut weight_map, &mut ip_to_aggregates, &mut aggregate_to_siblings, None);
+        // let mut aggregates = vec!["root".to_string()];
+        // aggregate_to_siblings.insert("root".to_string(), vec![]);
+        // weight_map.insert("root".to_string(), 1.0);
+        let mut aggregates = vec![];
+        weight_tree_helper(tree, &mut weight_map, &mut ip_to_aggregates, &mut aggregate_to_siblings, None, &mut aggregates);
+
+        debug!("Weight map");
+        for (k, v) in weight_map.clone() {
+            debug!("  {}: {}", k, v);
+        }
+        debug!("IP to aggregates");
+        for (k, v) in ip_to_aggregates.clone() {
+            debug!("  {}: {:?}", k, v);
+        }
+        debug!("Aggregate to siblings");
+        for (k, v) in aggregate_to_siblings.clone() {
+            debug!("  {}: {:?}", k, v);
+        }
 
         let shadow_buffer = ShadowBuffer::new(packet_sample_prob, MAX_PACKETS, ip_to_aggregates.clone());
 
@@ -220,7 +245,7 @@ impl HierarchicalApproximateFairDropping {
     fn update_ingress_rate(&mut self, pkt: &Pkt) {
         let time_since_last_update = SystemTime::now().duration_since(self.last_time_update).unwrap().as_secs_f64();
         let packet_len = pkt.len() as f64;
-        self.ingress_rate = (1.0 - f64::powf(E, -time_since_last_update / K)) * (packet_len / time_since_last_update) + f64::powf(E, -time_since_last_update / K) * self.ingress_rate;
+        self.ingress_rate = exponential_smooth(self.ingress_rate, packet_len / time_since_last_update, time_since_last_update, K);
         self.last_time_update = SystemTime::now();
     }
 
@@ -231,39 +256,59 @@ impl HierarchicalApproximateFairDropping {
 
         // Update the fair rate for each aggregate.
         for aggregate in aggregates {
+            debug!("  Aggregate: {}", aggregate);
             if !self.is_active(&aggregate) || !self.aggregate_to_rate.contains_key(&aggregate) {
                 continue;
             }
             if !self.aggregate_to_fair_rate.contains_key(&aggregate) {
-                self.aggregate_to_fair_rate.insert(aggregate.clone(), STARTING_RATE_IN_BYTES);
+                self.aggregate_to_fair_rate.insert(aggregate.clone(), capacity);
             }
             let total_rate = self.get_total_rate(&aggregate);
             let old_fair_rate = self.aggregate_to_fair_rate.get(&aggregate).expect(format!("Failed to get fair rate for aggregate: {}", aggregate).as_str()).clone();
-            let fair_rate = old_fair_rate * (self.aggregate_to_weight.get(&aggregate).expect(format!("Failed to get weight for aggregate: {}", aggregate).as_str()).clone() / self.get_total_active_weight(&aggregate)) * capacity / total_rate;
-            self.aggregate_to_fair_rate.insert(aggregate.clone(), fair_rate);
-            debug!("Aggregate: {} new fair rate: {}", aggregate, fair_rate);
+            debug!("    Full Ingress rate: {}", self.ingress_rate);
+            debug!("    total rate: {}", total_rate);
+            debug!("    old fair rate: {}", old_fair_rate);
+            debug!("    Capacity: {}", capacity);
+            debug!("    Total weight: {}", self.get_total_active_weight(&aggregate));
+            debug!("    Weight: {}", self.aggregate_to_weight.get(&aggregate).expect(format!("Failed to get weight for aggregate: {}", aggregate).as_str()).clone());
+            let mut fair_rate = old_fair_rate * (self.aggregate_to_weight.get(&aggregate).expect(format!("Failed to get weight for aggregate: {}", aggregate).as_str()).clone() / self.get_total_active_weight(&aggregate)) * capacity / total_rate;
+            let mut num_siblings = self.aggregate_to_siblings.get(&aggregate).expect(format!("Failed to get siblings for aggregate: {}", aggregate).as_str()).len() as f64;
+            if num_siblings < 1.0 {
+                num_siblings = 1.0;
+            }
+            if fair_rate > 10.0 * num_siblings * capacity {
+                fair_rate = 10.0 * num_siblings * capacity;
+            }
+            if fair_rate < capacity / (10.0 * num_siblings) {
+                fair_rate = capacity / (10.0 * num_siblings);
+            }
+            self.aggregate_to_fair_rate.insert(aggregate.clone(), fair_rate.clone());
+            debug!("    New fair rate: {}", fair_rate);
             capacity = fair_rate;
         }
     }
 
-    /// Gets the full rate of the aggregate and its siblings in the tree.
+    /// Gets the full rate of the aggregate and its descendents in the tree.
     fn get_total_rate(&mut self, agg: &String) -> f64 {
-        let mut total_rate = self.aggregate_to_rate.get(agg).expect(format!("Failed to get rate for aggregate: {}", agg).as_str()).clone();
-        let siblings = self.aggregate_to_siblings.get(agg).expect(format!("Failed to get siblings for aggregate: {}", agg).as_str()).clone();
-        for sibling in siblings {
-            total_rate += self.aggregate_to_rate.get(&sibling).expect(format!("Failed to get rate for sibling aggregate: {}", sibling).as_str()).clone();
-        }
+        let occupancy = self.shadow_buffer.aggregate_occupancy.get(agg).expect(format!("Failed to get aggregate occupancy for aggregate: {}", agg).as_str()).clone() as f64;
+        let total_rate = occupancy / self.shadow_buffer.get_total_packets() as f64 * self.ingress_rate;
         total_rate
     }
 
     fn update_rate(&mut self, pkt: &Pkt) {
         let aggregates = get_aggregates(&pkt, &self.ip_to_aggregates);
+        debug!("Updating rate");
         for aggregate in aggregates {
+            debug!("  Aggregate: {}", aggregate);
             if !self.is_active(&aggregate) {
                 continue;
             }
             let occupancy = self.shadow_buffer.aggregate_occupancy.get(&aggregate).expect(format!("Failed to get aggregate occupancy for aggregate: {}", aggregate).as_str()).clone() as f64;
+            debug!("    Occupancy: {}", occupancy);
+            debug!("    Total packets: {}", self.shadow_buffer.get_total_packets());
+            debug!("    Ingress rate: {}", self.ingress_rate);
             let new_rate = occupancy / self.shadow_buffer.get_total_packets() as f64 * self.ingress_rate;
+            debug!("    New rate: {}", new_rate);
             self.aggregate_to_rate.insert(aggregate.clone(), new_rate);
         }
     }
@@ -297,6 +342,7 @@ impl HierarchicalApproximateFairDropping {
             let rate = self.aggregate_to_rate.get(&aggregate).expect(format!("Failed to get rate for aggregate: {}", aggregate).as_str()).clone();
             let drop_prob = 1.0 - 
                                 (fair_rate / rate);
+            debug!("Aggregate: {} drop prob: {}", aggregate, drop_prob);
             if rand::random::<f64>() < drop_prob {
                 return true;
             }

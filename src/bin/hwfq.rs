@@ -31,7 +31,7 @@ struct Opt {
     #[structopt(short, long, required_if("scheduler", "hwfq"))]
     weights_cfg: Option<std::path::PathBuf>,
 
-    #[structopt(long, default_value = "0.01")]
+    #[structopt(long, default_value = "0.1")]
     sample_prob: f64,
 }
 
