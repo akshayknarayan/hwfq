@@ -2,7 +2,7 @@ use color_eyre::{
     eyre::{eyre, Report},
     Help,
 };
-use hwfq::scheduler::{Drr, Fifo, HierarchicalDeficitWeightedRoundRobin, HierarchicalApproximateFairDropping};
+use hwfq::scheduler::{Drr, Fifo, HierarchicalDeficitWeightedRoundRobin, HierarchicalApproximateFairDropping, ApproximateFairDropping};
 use hwfq::scheduler::common::WeightTree;
 use hwfq::Datapath;
 use structopt::StructOpt;
@@ -89,6 +89,24 @@ pub fn main() -> Result<(), Report> {
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
                 ),
                 hwfq,
+            )?;
+            s.run().unwrap();
+        }
+        "afd" => {
+            let cfg = opt.weights_cfg.unwrap();
+            let wt = WeightTree::from_file(&cfg);
+            let afd = ApproximateFairDropping::new(
+                opt.sample_prob,
+                wt?,
+            );
+            let s = Datapath::new(
+                &opt.listen_interface,
+                &opt.fwd_address,
+                Some(
+                    opt.rate_bytes_per_sec
+                        .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
+                ),
+                afd,
             )?;
             s.run().unwrap();
         }

@@ -30,6 +30,9 @@ pub use drr::Drr;
 mod hdwrr;
 pub use hdwrr::HierarchicalDeficitWeightedRoundRobin;
 
+mod afd;
+pub use afd::ApproximateFairDropping;
+
 mod hafd;
 pub use hafd::HierarchicalApproximateFairDropping;
 
