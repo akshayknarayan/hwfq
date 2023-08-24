@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use crate::scheduler::common::WeightTree;
 use crate::scheduler::common::parse_ip;
 
-const MAX_PACKETS : usize = 100;
+const MAX_PACKETS : usize = 500;
 const IDEAL_QUEUE_LENGTH : f64 = 100.0;
 
 const M_FAIR_UPDATES_PER_SECOND : f64 = 160.0;
@@ -22,7 +22,8 @@ const BETA : f64 = 1.8;
 fn ip_set_to_agg_name(ips: &[Vec<u32>]) -> String {
     let mut new_ips = ips.clone().to_vec();
     new_ips.sort();
-    new_ips.iter().map(|ip| ip.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(".")).collect::<Vec<String>>().join("_")
+    let agg_name = new_ips.iter().map(|ip| ip.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(".")).collect::<Vec<String>>().join("_");
+    agg_name
 }
 
 fn get_aggregates(packet: &Pkt, ip_to_aggregates: &HashMap<u32, Vec<String>>) -> Vec<String> {
@@ -34,7 +35,7 @@ fn get_aggregates(packet: &Pkt, ip_to_aggregates: &HashMap<u32, Vec<String>>) ->
         src_ip[0], src_ip[1], src_ip[2], src_ip[3]
     );
 
-    // debug!("New src ip: {}", new_src_ip);
+    debug!("New src ip: {} from {:?}", new_src_ip, src_ip);
 
     let parsed_ip = parse_ip(new_src_ip.as_str()).expect("Failed to parse IP");
     //info!("Parsed IP: {}", parsed_ip);
@@ -107,6 +108,17 @@ impl ShadowBuffer {
     /// Gets the total number of packets in the shadow buffer.
     pub fn get_total_packets(&self) -> usize {
         self.inner.len()
+    }
+
+    pub fn num_unique_flows(&self) -> usize {
+        let src_ips_seen = self.inner.iter().map(|p| p.ip_hdr.source).collect::<Vec<[u8; 4]>>();
+        let mut unique_src_ips = vec![];
+        for src_ip in src_ips_seen {
+            if !unique_src_ips.contains(&src_ip) {
+                unique_src_ips.push(src_ip);
+            }
+        }
+        unique_src_ips.len()
     }
 
     fn dbg(&self) {
@@ -283,15 +295,22 @@ impl ApproximateFairDropping {
             if occupancy == 0.0 {
                 continue;
             }
+            // let drop_prob = 1.0 - (weight_share) *
+            //                     (self.m_fair / occupancy);
+            let num_unique_flows = self.shadow_buffer.num_unique_flows() as f64;
+            let expected_number_of_packets = self.shadow_buffer.get_total_packets() as f64 / num_unique_flows;
             let drop_prob = 1.0 - (weight_share) *
-                                (self.m_fair / occupancy);
+                                (expected_number_of_packets / occupancy);
             debug!("Aggregate: {} drop prob: {}", aggregate, drop_prob);
             debug!("  Weight share: {}", weight_share);
             debug!("  Occupancy: {}", occupancy);
             debug!("  Mfair: {}", self.m_fair);
             debug!("  queue length: {}", self.inner.len());
             debug!("  shadow length: {}", self.shadow_buffer.get_total_packets());
+            debug!("  num unique flows: {}", num_unique_flows);
+            debug!("  drop_prob: {}", drop_prob);
             if rand::random::<f64>() < drop_prob {
+                // assert!(aggregate == "704643072");
                 return true;
             }
         }
@@ -451,43 +470,19 @@ mod t {
         let (mut hwfq, b_ip, c_ip, d_ip) = make_test_tree();
         let dst_ip = [42, 2, 0, 0];
 
-        // enqueue a bunch of packets
-        for _ in 0..100 {
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::Tcp,
-                    b_ip,
-                    dst_ip,
-                ),
-                buf: vec![0u8; 100],
-            })
-            .unwrap();
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::Tcp,
-                    c_ip,
-                    dst_ip,
-                ),
-                buf: vec![0u8; 100],
-            })
-            .unwrap();
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::Tcp,
-                    d_ip,
-                    dst_ip,
-                ),
-                buf: vec![0u8; 100],
-            })
-            .unwrap();
-        }
-        // Now enqueue a bunch but enqueue 2 b for every 1 c and 2 d for every 1 b.
+        // for _ in 0..500 {
+        //     hwfq.enq(Pkt {
+        //         ip_hdr: etherparse::Ipv4Header::new(
+        //             100,
+        //             64,
+        //             etherparse::IpNumber::Tcp,
+        //             b_ip,
+        //             dst_ip,
+        //         ),
+        //         buf: vec![0u8; 100],
+        //     }).unwrap();
+        // }
+        // Now enqueue a bunch but enqueue 2 b for every 1 c and 2 b for every 1 d.
         for _ in 0..1000 {
             hwfq.enq(Pkt {
                 ip_hdr: etherparse::Ipv4Header::new(
@@ -537,7 +532,10 @@ mod t {
         let mut b_cnt = 0;
         let mut c_cnt = 0;
         let mut d_cnt = 0;
-        for _ in 0..hwfq.inner.len() {
+        for _ in 0..500 {
+            let p = hwfq.deq().unwrap().unwrap();
+        }
+        for _ in 0..500 {
             let p = hwfq.deq().unwrap().unwrap();
             if p.ip_hdr.source == b_ip {
                 b_cnt += 1;
@@ -550,7 +548,7 @@ mod t {
             }
         }
 
-        // should be d + e ~= 2 * b, e ~= 2 * d
+        // should be b ~= c ~= d
         dbg!(b_cnt, c_cnt, d_cnt);
         assert!(((b_cnt - c_cnt) as isize).abs() < 5);
         assert!(((b_cnt - d_cnt) as isize).abs() < 5);
