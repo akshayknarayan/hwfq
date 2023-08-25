@@ -94,10 +94,8 @@ pub fn main() -> Result<(), Report> {
         }
         "afd" => {
             let cfg = opt.weights_cfg.unwrap();
-            let wt = WeightTree::from_file(&cfg);
             let afd = ApproximateFairDropping::new(
                 opt.sample_prob,
-                wt?,
             );
             let s = Datapath::new(
                 &opt.listen_interface,
