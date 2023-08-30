@@ -51,7 +51,7 @@ fn get_aggregates(packet: &Pkt, ip_to_aggregates: &HashMap<u32, Vec<String>>) ->
     // Turn the source IP into a String joined with periods.
     let new_src_ip = format!("{}.{}.{}.{}", src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
 
-    debug!("New src ip: {}", new_src_ip);
+    // debug!("New src ip: {}", new_src_ip);
 
     let parsed_ip = parse_ip(new_src_ip.as_str()).expect("Failed to parse IP");
     ip_to_aggregates
@@ -65,7 +65,7 @@ pub struct ShadowBuffer {
     /// The probability that a packet is sampled into the shadow buffer.
     packet_sample_prob: f64,
     /// The maximum number of packets in the shadow buffer.
-    max_packets: usize,
+    pub max_packets: usize,
     /// Maps from an IP to the aggregates it belongs to.
     ip_to_aggregates: HashMap<u32, Vec<String>>,
     /// Maps from an aggregate to its count inside the shadow buffer.
@@ -152,8 +152,8 @@ impl ShadowBuffer {
     
     fn update_expected_occupancy(&mut self, pkt: &Pkt) {
         let aggregates = get_aggregates(pkt, &self.ip_to_aggregates);
-        debug!("Aggregates: {:?}", aggregates);
-        let mut occupancy = self.size() as f64;
+        // debug!("Aggregates: {:?}", aggregates);
+        let mut occupancy = self.max_packets as f64;
         for aggregate in aggregates {
             let agg_weight = self.aggregate_to_weight.get(&aggregate).unwrap_or_else(|| {
                 panic!("Failed to get weight for aggregate: {}", aggregate)
@@ -161,10 +161,10 @@ impl ShadowBuffer {
             // Get the total weight of all active siblings.
             let total_weight : f64 = self.get_total_active_weight(&aggregate);
             let weight_share = agg_weight / total_weight;
-            debug!("Weight share: {}", weight_share);
+            // debug!("Weight share: {}", weight_share);
             occupancy = weight_share * occupancy;
-            debug!("Occupancy: {}", occupancy);
-            debug!("Total shadow buffer occupancy: {}", self.size() as f64);
+            // debug!("Occupancy: {}", occupancy);
+            // debug!("Total shadow buffer occupancy: {}", self.size() as f64);
             self.aggregate_to_expected_occupancy
                 .insert(aggregate.clone(), occupancy);
         }
@@ -242,8 +242,8 @@ impl HierarchicalApproximateFairDropping {
                 WeightTree::Leaf { weight, .. } => {
                     let ips = set_ips.unwrap();
                     // Print out the ips.
-                    debug!("IPS: {:?}", ips);
-                    debug!("Weight: {}", weight);
+                    // debug!("IPS: {:?}", ips);
+                    // debug!("Weight: {}", weight);
                     let ip_array = [ips.clone()];
                     let agg = ip_set_to_agg_name(&ip_array);
                     let mut all_aggs = aggregates.to_vec();
@@ -258,8 +258,8 @@ impl HierarchicalApproximateFairDropping {
                     children,
                 } => {
                     // Print out the ips.
-                    debug!("IPS: {:?}", ips);
-                    debug!("Weight: {}", weight);
+                    // debug!("IPS: {:?}", ips);
+                    // debug!("Weight: {}", weight);
                     let agg = ip_set_to_agg_name(&ips);
                     if !aggregate_to_siblings.contains_key(&agg) {
                         aggregate_to_siblings.insert(agg.clone(), vec![]);
@@ -279,10 +279,10 @@ impl HierarchicalApproximateFairDropping {
                                 &all_aggs,
                             );
                             let new_child = child.clone();
-                            debug!("Matching child");
+                            // debug!("Matching child");
                             match new_child.as_ref() {
                                 WeightTree::Leaf { weight: _, ips: _ } => {
-                                    debug!("Matched as leaf");
+                                    // debug!("Matched as leaf");
                                     let ip_array = [child_ips.clone()];
                                     let agg = ip_set_to_agg_name(&ip_array);
                                     children_aggregates.push(agg);
@@ -292,7 +292,7 @@ impl HierarchicalApproximateFairDropping {
                                     ips: _,
                                     children: _,
                                 } => {
-                                    debug!("Matched as non leaf");
+                                    // debug!("Matched as non leaf");
                                     let ip_array = [child_ips.clone()];
                                     let agg = ip_set_to_agg_name(&ip_array);
                                     children_aggregates.push(agg);
@@ -300,7 +300,7 @@ impl HierarchicalApproximateFairDropping {
                             }
                         }
                     }
-                    debug!("Child aggregates: {:?}", children_aggregates);
+                    // debug!("Child aggregates: {:?}", children_aggregates);
                     for child_agg in children_aggregates.clone() {
                         let siblings = children_aggregates
                             .clone()
@@ -380,8 +380,13 @@ impl HierarchicalApproximateFairDropping {
         match last_active_agg {
             Some(last_active_agg) => {
                 let occupancy = self.shadow_buffer.occupancy(last_active_agg) as f64;
+                if occupancy < 5.0 {
+                    return false;
+                }
                 let expected_occupancy = self.shadow_buffer.expected_occupancy(last_active_agg);
                 let drop_prob = 1.0 - (expected_occupancy / occupancy) * (self.egress_rate / self.ingress_rate);
+                debug!("Ing rate: {}, Egr rate: {}, Drop prob: {}", self.ingress_rate, self.egress_rate, drop_prob);
+                debug!("Occupancy: {}, Expected occupancy: {}, Drop prob: {}", occupancy, expected_occupancy, drop_prob);
                 self.shadow_buffer.get_rand_f64() < drop_prob
             }
             None => {false}
