@@ -114,7 +114,6 @@ pub fn main() -> Result<(), Report> {
             let hafd = HierarchicalApproximateFairDropping::new(
                 opt.sample_prob,
                 wt?,
-                opt.rate_bytes_per_sec.ok_or(eyre!("BW Capacity is required to use scheduler"))?,
             );
             let s = Datapath::new(
                 &opt.listen_interface,
