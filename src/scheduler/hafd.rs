@@ -69,19 +69,30 @@ pub struct ShadowBuffer {
     /// Maps from an IP to the aggregates it belongs to.
     ip_to_aggregates: HashMap<u32, Vec<String>>,
     /// Maps from an aggregate to its count inside the shadow buffer.
-    pub aggregate_occupancy: HashMap<String, usize>,
-    pub rng: StdRng,
+    aggregate_occupancy: HashMap<String, usize>,
+    // Aggregate to weight map.
+    aggregate_to_weight: HashMap<String, f64>,
+    // Aggregate to siblings map.
+    aggregate_to_siblings: HashMap<String, Vec<String>>,
+    /// Maps from an aggregate to its expected occupancy in the shadow buffer.
+    aggregate_to_expected_occupancy: HashMap<String, f64>,
+    /// The random number generator.
+    rng: StdRng,
     /// The shadow buffer.
     inner: VecDeque<Pkt>,
 }
 
 impl ShadowBuffer {
-    pub fn new(packet_sample_prob: f64, max_packets: usize, ip_to_aggregates: &HashMap<u32, Vec<String>>) -> Self {
+    pub fn new(packet_sample_prob: f64, max_packets: usize, ip_to_aggregates: &HashMap<u32, Vec<String>>,
+        aggregate_to_weight: HashMap<String, f64>, aggregate_to_siblings: HashMap<String, Vec<String>>,) -> Self {
         Self {
             packet_sample_prob,
             max_packets,
             ip_to_aggregates: ip_to_aggregates.clone(),
             aggregate_occupancy: HashMap::new(),
+            aggregate_to_weight,
+            aggregate_to_siblings,
+            aggregate_to_expected_occupancy: HashMap::new(),
             rng: StdRng::seed_from_u64(0),
             inner: Default::default(),
         }
@@ -101,6 +112,7 @@ impl ShadowBuffer {
             removed = self.inner.pop_front();
         }
         self.update_aggregate_occupancy(&p, removed);
+        self.update_expected_occupancy(&p);
         self.inner.push_back(p);
 
         Ok(())
@@ -137,14 +149,62 @@ impl ShadowBuffer {
             }
         }
     }
+    
+    fn update_expected_occupancy(&mut self, pkt: &Pkt) {
+        let aggregates = get_aggregates(pkt, &self.ip_to_aggregates);
+        debug!("Aggregates: {:?}", aggregates);
+        let mut occupancy = self.size() as f64;
+        for aggregate in aggregates {
+            let agg_weight = self.aggregate_to_weight.get(&aggregate).unwrap_or_else(|| {
+                panic!("Failed to get weight for aggregate: {}", aggregate)
+            }).clone();
+            // Get the total weight of all active siblings.
+            let total_weight : f64 = self.get_total_active_weight(&aggregate);
+            let weight_share = agg_weight / total_weight;
+            debug!("Weight share: {}", weight_share);
+            occupancy = weight_share * occupancy;
+            debug!("Occupancy: {}", occupancy);
+            debug!("Total shadow buffer occupancy: {}", self.size() as f64);
+            self.aggregate_to_expected_occupancy
+                .insert(aggregate.clone(), occupancy);
+        }
+    }
 
-    // Walks through the buffer and finds the total number of packets that share a source IP with the given packet.
+    // Gets the total weight of the aggregate and its siblings in the tree. Ignores non-active aggregates.
+    fn get_total_active_weight(&mut self, agg: &String) -> f64 {
+        let mut total_weight = *self
+            .aggregate_to_weight
+            .get(agg)
+            .unwrap_or_else(|| panic!("Failed to get weight for aggregate: {}", agg));
+        for sibling in self
+            .aggregate_to_siblings
+            .get(agg)
+            .unwrap_or_else(|| panic!("Failed to get siblings for aggregate: {}", agg))
+            .clone()
+        {
+            if self.is_constrained(&sibling) {
+                total_weight += self.aggregate_to_weight.get(&sibling).unwrap_or_else(|| {
+                    panic!("Failed to get weight for sibling aggregate: {}", sibling)
+                });
+            }
+        }
+        total_weight
+    }
+
     pub fn occupancy(&self, aggregate: &String) -> usize {
         self.aggregate_occupancy.get(aggregate).unwrap_or_else(|| panic!("Failed to get aggregate occupancy for aggregate: {}", aggregate)).clone()
     }
 
+    pub fn expected_occupancy(&self, aggregate: &String) -> f64 {
+        self.aggregate_to_expected_occupancy.get(aggregate).unwrap_or_else(|| panic!("Failed to get expected aggregate occupancy for aggregate: {}", aggregate)).clone()
+    }
+
     pub fn get_rand_f64(&mut self) -> f64 {
         self.rng.next_u64() as f64 / u64::MAX as f64
+    }
+
+    pub fn is_constrained(&mut self, agg: &String) -> bool {
+        self.aggregate_occupancy.contains_key(agg)
     }
 }
 
@@ -153,9 +213,6 @@ impl ShadowBuffer {
 /// See [`HierarchicalApproximateFairDropping::new`].
 #[derive(Debug)]
 pub struct HierarchicalApproximateFairDropping {
-    aggregate_to_weight: HashMap<String, f64>,
-    aggregate_to_siblings: HashMap<String, Vec<String>>,
-    aggregate_to_buffer_occupancy: HashMap<String, f64>,
     /// Maps from a single IP to the list of aggregates it belongs to, from root to leaf.
     ip_to_aggregates: HashMap<u32, Vec<String>>,
     shadow_buffer: ShadowBuffer,
@@ -282,12 +339,9 @@ impl HierarchicalApproximateFairDropping {
         }
 
         let shadow_buffer =
-            ShadowBuffer::new(packet_sample_prob, MAX_PACKETS, &ip_to_aggregates);
+            ShadowBuffer::new(packet_sample_prob, MAX_PACKETS, &ip_to_aggregates, weight_map.clone(), aggregate_to_siblings.clone());
 
         Self {
-            aggregate_to_weight: weight_map,
-            aggregate_to_siblings,
-            aggregate_to_buffer_occupancy: HashMap::new(),
             ip_to_aggregates,
             shadow_buffer,
             ingress_rate: 0.0,
@@ -312,58 +366,13 @@ impl HierarchicalApproximateFairDropping {
         self.last_egress_update = SystemTime::now();
     }
 
-    fn update_aggregate_to_buffer_occupancy(&mut self, pkt: &Pkt) {
-        let aggregates = get_aggregates(pkt, &self.ip_to_aggregates);
-        debug!("Aggregates: {:?}", aggregates);
-        let mut occupancy = self.shadow_buffer.size() as f64;
-        for aggregate in aggregates {
-            let agg_weight = self.aggregate_to_weight.get(&aggregate).unwrap_or_else(|| {
-                panic!("Failed to get weight for aggregate: {}", aggregate)
-            }).clone();
-            // Get the total weight of all active siblings.
-            let total_weight : f64 = self.get_total_active_weight(&aggregate);
-            let weight_share = agg_weight / total_weight;
-            debug!("Weight share: {}", weight_share);
-            occupancy = weight_share * occupancy;
-            debug!("Occupancy: {}", occupancy);
-            debug!("Total shadow buffer occupancy: {}", self.shadow_buffer.size() as f64);
-            self.aggregate_to_buffer_occupancy
-                .insert(aggregate.clone(), occupancy);
-        }
-    }
-
-    fn is_active(&mut self, agg: &String) -> bool {
-        self.shadow_buffer.aggregate_occupancy.contains_key(agg)
-    }
-
-    // Gets the total weight of the aggregate and its siblings in the tree. Ignores non-active aggregates.
-    fn get_total_active_weight(&mut self, agg: &String) -> f64 {
-        let mut total_weight = *self
-            .aggregate_to_weight
-            .get(agg)
-            .unwrap_or_else(|| panic!("Failed to get weight for aggregate: {}", agg));
-        for sibling in self
-            .aggregate_to_siblings
-            .get(agg)
-            .unwrap_or_else(|| panic!("Failed to get siblings for aggregate: {}", agg))
-            .clone()
-        {
-            if self.is_active(&sibling) {
-                total_weight += self.aggregate_to_weight.get(&sibling).unwrap_or_else(|| {
-                    panic!("Failed to get weight for sibling aggregate: {}", sibling)
-                });
-            }
-        }
-        total_weight
-    }
-
     fn should_drop(&mut self, p: &Pkt) -> bool {
         let aggregates = get_aggregates(p, &self.ip_to_aggregates);
         // Find the last active aggregate in the list and use its drop probability.
         let mut last_active_agg = None;
-        // Walk thorugh backwards and find the last active aggregate.
+        // Walk through backwards and find the last constrained aggregate.
         for aggregate in aggregates.iter().rev() {
-            if self.is_active(aggregate) {
+            if self.shadow_buffer.is_constrained(aggregate) {
                 last_active_agg = Some(aggregate);
                 break;
             }
@@ -371,7 +380,7 @@ impl HierarchicalApproximateFairDropping {
         match last_active_agg {
             Some(last_active_agg) => {
                 let occupancy = self.shadow_buffer.occupancy(last_active_agg) as f64;
-                let expected_occupancy = self.aggregate_to_buffer_occupancy.get(last_active_agg).unwrap_or_else(|| panic!("Failed to get buffer occupancy for aggregate: {}", last_active_agg));
+                let expected_occupancy = self.shadow_buffer.expected_occupancy(last_active_agg);
                 let drop_prob = 1.0 - (expected_occupancy / occupancy) * (self.egress_rate / self.ingress_rate);
                 self.shadow_buffer.get_rand_f64() < drop_prob
             }
@@ -384,7 +393,6 @@ impl Scheduler for HierarchicalApproximateFairDropping {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         self.shadow_buffer.sample(&p)?;
         self.update_ingress_rate(&p);
-        self.update_aggregate_to_buffer_occupancy(&p);
 
         if !self.should_drop(&p) {
             self.inner.push_back(p.clone());
