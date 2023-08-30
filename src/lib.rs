@@ -19,7 +19,9 @@ use std::process::Command;
 use tracing::{debug, info, trace};
 use tun_tap::Iface;
 
+#[cfg(target_os = "linux")]
 mod ip_socket;
+#[cfg(target_os = "linux")]
 pub use ip_socket::IpIfaceSocket;
 
 pub mod scheduler;

@@ -2,7 +2,8 @@ use color_eyre::{
     eyre::{eyre, Report},
     Help,
 };
-use hwfq::scheduler::{Drr, Fifo, HierarchicalDeficitWeightedRoundRobin, WeightTree};
+use hwfq::scheduler::{Drr, Fifo, HierarchicalDeficitWeightedRoundRobin, HierarchicalApproximateFairDropping, ApproximateFairDropping};
+use hwfq::scheduler::common::WeightTree;
 use hwfq::Datapath;
 use structopt::StructOpt;
 
@@ -29,6 +30,9 @@ struct Opt {
 
     #[structopt(short, long, required_if("scheduler", "hwfq"))]
     weights_cfg: Option<std::path::PathBuf>,
+
+    #[structopt(long, default_value = "0.1")]
+    sample_prob: f64,
 }
 
 pub fn main() -> Result<(), Report> {
@@ -85,6 +89,41 @@ pub fn main() -> Result<(), Report> {
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
                 ),
                 hwfq,
+            )?;
+            s.run().unwrap();
+        }
+        "afd" => {
+            let cfg = opt.weights_cfg.unwrap();
+            let afd = ApproximateFairDropping::new(
+                opt.sample_prob,
+            );
+            let s = Datapath::new(
+                &opt.listen_interface,
+                &opt.fwd_address,
+                Some(
+                    opt.rate_bytes_per_sec
+                        .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
+                ),
+                afd,
+            )?;
+            s.run().unwrap();
+        }
+        "hafd" => {
+            let cfg = opt.weights_cfg.unwrap();
+            let wt = WeightTree::from_file(&cfg);
+            let hafd = HierarchicalApproximateFairDropping::new(
+                opt.sample_prob,
+                wt?,
+                opt.rate_bytes_per_sec.ok_or(eyre!("BW Capacity is required to use scheduler"))?,
+            );
+            let s = Datapath::new(
+                &opt.listen_interface,
+                &opt.fwd_address,
+                Some(
+                    opt.rate_bytes_per_sec
+                        .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
+                ),
+                hafd,
             )?;
             s.run().unwrap();
         }

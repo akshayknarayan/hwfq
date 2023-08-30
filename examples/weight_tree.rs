@@ -1,5 +1,6 @@
 use color_eyre::{eyre::eyre, Report};
-use hwfq::scheduler::{HierarchicalDeficitWeightedRoundRobin, WeightTree};
+use hwfq::scheduler::HierarchicalDeficitWeightedRoundRobin;
+use hwfq::scheduler::common::WeightTree;
 
 fn main() -> Result<(), Report> {
     let mut args = std::env::args();
