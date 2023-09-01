@@ -159,7 +159,11 @@ impl ShadowBuffer {
                 panic!("Failed to get weight for aggregate: {}", aggregate)
             }).clone();
             // Get the total weight of all active siblings.
-            let total_weight : f64 = self.get_total_active_weight(&aggregate);
+            let (total_weight, inactive_occupancy) = self.get_total_active_weight_and_inactive_occupancy(&aggregate);
+
+            // Remove the inactive occupancy from consideration.
+            occupancy -= inactive_occupancy;
+
             let weight_share = agg_weight / total_weight;
             // debug!("Weight share: {}", weight_share);
             occupancy = weight_share * occupancy;
@@ -170,12 +174,13 @@ impl ShadowBuffer {
         }
     }
 
-    // Gets the total weight of the aggregate and its siblings in the tree. Ignores non-active aggregates.
-    fn get_total_active_weight(&mut self, agg: &String) -> f64 {
+    // Gets the total weight and inactive occupancy of the aggregate and its siblings in the tree. Ignores non-active aggregates.
+    fn get_total_active_weight_and_inactive_occupancy(&mut self, agg: &String) -> (f64, f64) {
         let mut total_weight = *self
             .aggregate_to_weight
             .get(agg)
             .unwrap_or_else(|| panic!("Failed to get weight for aggregate: {}", agg));
+        let mut inactive_occupancy = 0.0;
         for sibling in self
             .aggregate_to_siblings
             .get(agg)
@@ -186,9 +191,13 @@ impl ShadowBuffer {
                 total_weight += self.aggregate_to_weight.get(&sibling).unwrap_or_else(|| {
                     panic!("Failed to get weight for sibling aggregate: {}", sibling)
                 });
+            } else {
+                inactive_occupancy += self.aggregate_occupancy.get(&sibling).unwrap_or_else(|| {
+                    &0
+                }).clone() as f64;
             }
         }
-        total_weight
+        (total_weight, inactive_occupancy)
     }
 
     pub fn occupancy(&self, aggregate: &String) -> usize {
@@ -312,9 +321,6 @@ impl HierarchicalApproximateFairDropping {
                 }
             }
         }
-        // let mut aggregates = vec!["root".to_string()];
-        // aggregate_to_siblings.insert("root".to_string(), vec![]);
-        // weight_map.insert("root".to_string(), 1.0);
         let aggregates = vec![];
         weight_tree_helper(
             tree,
@@ -471,7 +477,7 @@ mod t {
     }
 
     #[test]
-    fn hwfq_basic() {
+    fn hafd_basic() {
         init();
         let (mut hwfq, b_ip, d_ip, e_ip) = make_test_tree();
         let dst_ip = [42, 2, 0, 0];
@@ -555,6 +561,100 @@ mod t {
         // This ratio should be 2.0.
         let ratio_e_to_d = (e_cnt as f64) / (d_cnt as f64);
         assert!((ratio_e_to_d - 2.0).abs() < 0.1);
+
+        // Assert that each aggregate sent more than 100 packets.
+        assert!(b_cnt > 100);
+        assert!(d_cnt > 100);
+        assert!(e_cnt > 100);
+    }
+
+    #[test]
+    fn hafd_unconstrained() {
+        init();
+        let (mut hwfq, b_ip, d_ip, e_ip) = make_test_tree();
+        let dst_ip = [42, 2, 0, 0];
+        let mut b_cnt = 0;
+        let mut d_cnt = 0;
+        let mut e_cnt = 0;
+
+        // Now enqueue a bunch but enqueue 8 b for every 5 c and 3 d.
+        let b_ingress_rate = 2;
+        let d_ingress_rate = 10;
+        let e_ingress_rate = 10;
+
+        let egress_rate = 9;
+        
+        for _ in 0..100000 {
+            for _ in 0..b_ingress_rate {
+                hwfq.enq(Pkt {
+                    ip_hdr: etherparse::Ipv4Header::new(
+                        100,
+                        64,
+                        etherparse::IpNumber::Tcp,
+                        b_ip,
+                        dst_ip,
+                    ),
+                    buf: vec![0u8; 100],
+                })
+                .unwrap();
+            }
+            for _ in 0..d_ingress_rate {
+                hwfq.enq(Pkt {
+                    ip_hdr: etherparse::Ipv4Header::new(
+                        100,
+                        64,
+                        etherparse::IpNumber::Tcp,
+                        d_ip,
+                        dst_ip,
+                    ),
+                    buf: vec![0u8; 100],
+                })
+                .unwrap();
+            }
+            for _ in 0..e_ingress_rate {
+                hwfq.enq(Pkt {
+                    ip_hdr: etherparse::Ipv4Header::new(
+                        100,
+                        64,
+                        etherparse::IpNumber::Tcp,
+                        e_ip,
+                        dst_ip,
+                    ),
+                    buf: vec![0u8; 100],
+                })
+                .unwrap();
+            }
+
+            // Attempt to dequeue packets
+            for _ in 0..egress_rate {
+                match hwfq.deq() {
+                    Ok(Some(p)) => {
+                        if p.ip_hdr.source == b_ip {
+                            b_cnt += 1;
+                        } else if p.ip_hdr.source == d_ip {
+                            d_cnt += 1;
+                        } else if p.ip_hdr.source == e_ip {
+                            e_cnt += 1;
+                        } else {
+                            panic!("unknown ip");
+                        }
+                    }
+                    Ok(None) => {},
+                    Err(e) => panic!("error: {:?}", e),
+                }
+            }
+        }
+
+        dbg!(b_cnt, d_cnt, e_cnt);
+        let expected_b_rate: f64 = b_ingress_rate as f64 / egress_rate as f64;
+        let b_actual = b_cnt  as f64 / (b_cnt + d_cnt + e_cnt) as f64;
+
+
+        assert!(((b_actual - expected_b_rate) / expected_b_rate).abs() > -0.1);
+        
+        // This ratio should be 2.0.
+        let ratio_e_to_d = (e_cnt as f64) / (d_cnt as f64);
+        assert!((ratio_e_to_d - 2.0).abs() < 0.15);
 
         // Assert that each aggregate sent more than 100 packets.
         assert!(b_cnt > 100);
