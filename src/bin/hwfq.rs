@@ -114,6 +114,7 @@ pub fn main() -> Result<(), Report> {
             let hafd = HierarchicalApproximateFairDropping::new(
                 opt.sample_prob,
                 wt?,
+                !opt.receiver_weights,
             );
             let s = Datapath::new(
                 &opt.listen_interface,

@@ -19,6 +19,14 @@ const K: f64 = 0.1;
 
 const MAX_PACKETS: usize = 1000;
 
+fn get_ip(packet: &Pkt, lookup_on_src_ip: bool) -> [u8; 4] {
+    if lookup_on_src_ip {
+        packet.ip_hdr.source
+    } else {
+        packet.ip_hdr.destination
+    }
+}
+
 // Hashes a vector of IPs to a string aggregate name.
 fn ip_set_to_agg_name(ips: &[Vec<u32>]) -> String {
     let mut new_ips = ips.clone().to_vec();
@@ -45,8 +53,8 @@ fn exponential_smooth(old_value: f64, new_value: f64, time_since: f64, k: f64) -
     (1.0 - f64::powf(E, -time_since / k)) * new_value + f64::powf(E, -time_since / k) * old_value
 }
 
-fn get_aggregates(packet: &Pkt, ip_to_aggregates: &HashMap<u32, Vec<String>>) -> Vec<String> {
-    let src_ip = packet.ip_hdr.source;
+fn get_aggregates(packet: &Pkt, ip_to_aggregates: &HashMap<u32, Vec<String>>, lookup_on_src_ip: bool) -> Vec<String> {
+    let src_ip = get_ip(packet, lookup_on_src_ip);
 
     // Turn the source IP into a String joined with periods.
     let new_src_ip = format!("{}.{}.{}.{}", src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
@@ -56,7 +64,7 @@ fn get_aggregates(packet: &Pkt, ip_to_aggregates: &HashMap<u32, Vec<String>>) ->
     let parsed_ip = parse_ip(new_src_ip.as_str()).expect("Failed to parse IP");
     ip_to_aggregates
         .get(&parsed_ip)
-        .expect("Failed to get aggregates from IP")
+        .expect(&format!("Failed to get aggregates from IP: {}", parsed_ip))
         .clone()
 }
 
@@ -78,13 +86,15 @@ pub struct ShadowBuffer {
     aggregate_to_expected_occupancy: HashMap<String, f64>,
     /// The random number generator.
     rng: StdRng,
+    lookup_on_src_ip: bool,
     /// The shadow buffer.
     inner: VecDeque<Pkt>,
 }
 
 impl ShadowBuffer {
     pub fn new(packet_sample_prob: f64, max_packets: usize, ip_to_aggregates: &HashMap<u32, Vec<String>>,
-        aggregate_to_weight: HashMap<String, f64>, aggregate_to_siblings: HashMap<String, Vec<String>>,) -> Self {
+        aggregate_to_weight: HashMap<String, f64>, aggregate_to_siblings: HashMap<String, Vec<String>>,
+        lookup_on_src_ip: bool) -> Self {
         Self {
             packet_sample_prob,
             max_packets,
@@ -94,6 +104,7 @@ impl ShadowBuffer {
             aggregate_to_siblings,
             aggregate_to_expected_occupancy: HashMap::new(),
             rng: StdRng::seed_from_u64(0),
+            lookup_on_src_ip,
             inner: Default::default(),
         }
     }
@@ -129,14 +140,14 @@ impl ShadowBuffer {
 
     /// Updates the aggregate occupancy table, which maps from an aggregate to its count inside the shadow buffer.
     pub fn update_aggregate_occupancy(&mut self, p: &Pkt, removed_packet: Option<Pkt>) {
-        let aggregates = get_aggregates(p, &self.ip_to_aggregates);
+        let aggregates = get_aggregates(p, &self.ip_to_aggregates, self.lookup_on_src_ip);
         for aggregate in aggregates {
             let count = self.aggregate_occupancy.entry(aggregate).or_insert(0);
             *count += 1;
         }
 
         if let Some(removed_packet) = removed_packet {
-            let aggregates = get_aggregates(&removed_packet, &self.ip_to_aggregates);
+            let aggregates = get_aggregates(&removed_packet, &self.ip_to_aggregates, self.lookup_on_src_ip);
             for aggregate in aggregates {
                 let count = self
                     .aggregate_occupancy
@@ -151,7 +162,7 @@ impl ShadowBuffer {
     }
     
     fn update_expected_occupancy(&mut self, pkt: &Pkt) {
-        let aggregates = get_aggregates(pkt, &self.ip_to_aggregates);
+        let aggregates = get_aggregates(pkt, &self.ip_to_aggregates, self.lookup_on_src_ip);
         // debug!("Aggregates: {:?}", aggregates);
         let mut occupancy = self.max_packets as f64;
         for aggregate in aggregates {
@@ -229,11 +240,12 @@ pub struct HierarchicalApproximateFairDropping {
     egress_rate: f64,
     last_ingress_update: SystemTime,
     last_egress_update: SystemTime,
+    lookup_on_src_ip: bool,
     inner: VecDeque<Pkt>,
 }
 
 impl HierarchicalApproximateFairDropping {
-    pub fn new(packet_sample_prob: f64, tree: WeightTree) -> Self {
+    pub fn new(packet_sample_prob: f64, tree: WeightTree, lookup_on_src_ip: bool) -> Self {
         let mut aggregate_to_siblings = HashMap::new();
         let mut ip_to_aggregates: HashMap<u32, Vec<String>> = HashMap::new();
         let mut weight_map: HashMap<String, f64> = HashMap::new();
@@ -345,7 +357,7 @@ impl HierarchicalApproximateFairDropping {
         }
 
         let shadow_buffer =
-            ShadowBuffer::new(packet_sample_prob, MAX_PACKETS, &ip_to_aggregates, weight_map.clone(), aggregate_to_siblings.clone());
+            ShadowBuffer::new(packet_sample_prob, MAX_PACKETS, &ip_to_aggregates, weight_map.clone(), aggregate_to_siblings.clone(), lookup_on_src_ip);
 
         Self {
             ip_to_aggregates,
@@ -354,6 +366,7 @@ impl HierarchicalApproximateFairDropping {
             egress_rate: 0.0,
             last_ingress_update: SystemTime::now(),
             last_egress_update: SystemTime::now(),
+            lookup_on_src_ip,
             inner: Default::default(),
         }
     }
@@ -373,7 +386,7 @@ impl HierarchicalApproximateFairDropping {
     }
 
     fn should_drop(&mut self, p: &Pkt) -> bool {
-        let aggregates = get_aggregates(p, &self.ip_to_aggregates);
+        let aggregates = get_aggregates(p, &self.ip_to_aggregates, self.lookup_on_src_ip);
         // Find the last active aggregate in the list and use its drop probability.
         let mut last_active_agg = None;
         // Walk through backwards and find the last constrained aggregate.
@@ -465,7 +478,7 @@ mod t {
 
         dbg!(wt.get_min_quantum().unwrap());
         let hwfq = super::HierarchicalApproximateFairDropping::new(
-            0.1, wt
+            0.1, wt, true
         );
 
         (
