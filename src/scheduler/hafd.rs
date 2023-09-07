@@ -6,7 +6,6 @@ use color_eyre::eyre::Report;
 use rand::RngCore;
 use rand::SeedableRng;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::f64::consts::E;
 use std::time::SystemTime;
@@ -142,19 +141,18 @@ impl ShadowBuffer {
     pub fn update_aggregate_occupancy(&mut self, p: &Pkt, removed_packet: Option<Pkt>) {
         let aggregates = get_aggregates(p, &self.ip_to_aggregates, self.lookup_on_src_ip);
         for aggregate in aggregates {
-            let count = self.aggregate_occupancy.entry(aggregate).or_insert(0);
-            *count += 1;
+            // Increment the count for the aggregate.
+            if !self.aggregate_occupancy.contains_key(&aggregate) {
+                self.aggregate_occupancy.insert(aggregate.clone(), 0);
+            }
+            self.aggregate_occupancy.insert(aggregate.clone(), self.aggregate_occupancy.get(&aggregate).unwrap_or_else(|| panic!("Failed to get aggregate occupancy for aggregate: {}", aggregate)).clone() + 1);
         }
 
         if let Some(removed_packet) = removed_packet {
             let aggregates = get_aggregates(&removed_packet, &self.ip_to_aggregates, self.lookup_on_src_ip);
             for aggregate in aggregates {
-                let count = self
-                    .aggregate_occupancy
-                    .entry(aggregate.clone())
-                    .or_insert(0);
-                *count -= 1;
-                if *count == 0 {
+                self.aggregate_occupancy.insert(aggregate.clone(), self.aggregate_occupancy.get(&aggregate).unwrap_or_else(|| panic!("Failed to get aggregate occupancy for aggregate: {}", aggregate)).clone() - 1);
+                if self.aggregate_occupancy.get(&aggregate).unwrap_or_else(|| panic!("Failed to get aggregate occupancy for aggregate: {}", aggregate)).clone() == 0 {
                     self.aggregate_occupancy.remove(&aggregate);
                 }
             }
@@ -241,11 +239,15 @@ pub struct HierarchicalApproximateFairDropping {
     last_ingress_update: SystemTime,
     last_egress_update: SystemTime,
     lookup_on_src_ip: bool,
+    packets_dropped: u32,
+    capacity_in_bytes: f64,
+    aggregate_to_update_and_ingress_rate: HashMap<String, (SystemTime, f64)>,
+    aggregate_to_update_and_egress_rate: HashMap<String, (SystemTime, f64)>,
     inner: VecDeque<Pkt>,
 }
 
 impl HierarchicalApproximateFairDropping {
-    pub fn new(packet_sample_prob: f64, tree: WeightTree, lookup_on_src_ip: bool) -> Self {
+    pub fn new(packet_sample_prob: f64, tree: WeightTree, lookup_on_src_ip: bool, capacity_in_bytes: Option<f64>) -> Self {
         let mut aggregate_to_siblings = HashMap::new();
         let mut ip_to_aggregates: HashMap<u32, Vec<String>> = HashMap::new();
         let mut weight_map: HashMap<String, f64> = HashMap::new();
@@ -367,6 +369,10 @@ impl HierarchicalApproximateFairDropping {
             last_ingress_update: SystemTime::now(),
             last_egress_update: SystemTime::now(),
             lookup_on_src_ip,
+            packets_dropped: 0,
+            capacity_in_bytes: capacity_in_bytes.unwrap(),
+            aggregate_to_update_and_ingress_rate: HashMap::new(),
+            aggregate_to_update_and_egress_rate: HashMap::new(),
             inner: Default::default(),
         }
     }
@@ -385,6 +391,36 @@ impl HierarchicalApproximateFairDropping {
         self.last_egress_update = SystemTime::now();
     }
 
+    fn update_aggregate_ingress_rate(&mut self, pkt: &Pkt) {
+        let aggregates = get_aggregates(pkt, &self.ip_to_aggregates, self.lookup_on_src_ip);
+        for aggregate in aggregates {
+            if !(self.aggregate_to_update_and_ingress_rate.contains_key(&aggregate)) {
+                self.aggregate_to_update_and_ingress_rate.insert(aggregate.clone(), (SystemTime::now(), 0.0));
+            }
+            let (last_ingress_update, old_rate) = self.aggregate_to_update_and_ingress_rate.get(&aggregate).unwrap_or_else(|| panic!("Failed to get ingress rate for aggregate: {}", aggregate)).clone();
+            let time_since_rate_calc = last_ingress_update.elapsed().unwrap().as_secs_f64();
+            let mut new_rate = pkt.len() as f64 / time_since_rate_calc;
+            new_rate = exponential_smooth(old_rate, new_rate, time_since_rate_calc, K);
+            self.aggregate_to_update_and_ingress_rate.insert(aggregate.clone(), (SystemTime::now(), new_rate));
+            debug!("Aggregate Stats: Time {}, Ingress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), new_rate);
+        }
+    }
+
+    fn update_aggregate_egress_rate(&mut self, pkt: &Pkt) {
+        let aggregates = get_aggregates(pkt, &self.ip_to_aggregates, self.lookup_on_src_ip);
+        for aggregate in aggregates {
+            if !(self.aggregate_to_update_and_egress_rate.contains_key(&aggregate)) {
+                self.aggregate_to_update_and_egress_rate.insert(aggregate.clone(), (SystemTime::now(), 0.0));
+            }
+            let (last_egress_update, old_rate) = self.aggregate_to_update_and_egress_rate.get(&aggregate).unwrap_or_else(|| panic!("Failed to get ingress rate for aggregate: {}", aggregate)).clone();
+            let time_since_rate_calc = last_egress_update.elapsed().unwrap().as_secs_f64();
+            let mut new_rate = pkt.len() as f64 / time_since_rate_calc;
+            new_rate = exponential_smooth(old_rate, new_rate, time_since_rate_calc, K);
+            self.aggregate_to_update_and_egress_rate.insert(aggregate.clone(), (SystemTime::now(), new_rate));
+            debug!("Aggregate Stats: Time {}, Egress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), new_rate);
+        }
+    }
+
     fn should_drop(&mut self, p: &Pkt) -> bool {
         let aggregates = get_aggregates(p, &self.ip_to_aggregates, self.lookup_on_src_ip);
         // Find the last active aggregate in the list and use its drop probability.
@@ -399,13 +435,13 @@ impl HierarchicalApproximateFairDropping {
         match last_active_agg {
             Some(last_active_agg) => {
                 let occupancy = self.shadow_buffer.occupancy(last_active_agg) as f64;
-                if occupancy < 5.0 {
+                if occupancy < 30.0 {
                     return false;
                 }
                 let expected_occupancy = self.shadow_buffer.expected_occupancy(last_active_agg);
-                let drop_prob = 1.0 - (expected_occupancy / occupancy) * (self.egress_rate / self.ingress_rate);
-                debug!("Ing rate: {}, Egr rate: {}, Drop prob: {}", self.ingress_rate, self.egress_rate, drop_prob);
-                debug!("Occupancy: {}, Expected occupancy: {}, Drop prob: {}", occupancy, expected_occupancy, drop_prob);
+                let drop_prob = 1.0 - (expected_occupancy / occupancy) * (self.capacity_in_bytes / self.ingress_rate);
+                let time_now_in_seconds = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64();
+                debug!("Time {}, Src: {:?}, Occupancy: {}, Expected occupancy: {}, ingress rate: {}, egress rate: {}, drop prob: {}", time_now_in_seconds, p.ip_hdr.source, occupancy, expected_occupancy, self.ingress_rate, self.egress_rate, drop_prob);
                 self.shadow_buffer.get_rand_f64() < drop_prob
             }
             None => {false}
@@ -417,9 +453,12 @@ impl Scheduler for HierarchicalApproximateFairDropping {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         self.shadow_buffer.sample(&p)?;
         self.update_ingress_rate(&p);
+        self.update_aggregate_ingress_rate(&p);
 
         if !self.should_drop(&p) {
             self.inner.push_back(p.clone());
+        } else {
+            self.packets_dropped += 1;
         }
         Ok(())
     }
@@ -430,6 +469,7 @@ impl Scheduler for HierarchicalApproximateFairDropping {
         }
         let p = self.inner.pop_front().unwrap();
         self.update_egress_rate(&p);
+        self.update_aggregate_egress_rate(&p);
         Ok(Some(p))
     }
 
@@ -478,7 +518,7 @@ mod t {
 
         dbg!(wt.get_min_quantum().unwrap());
         let hwfq = super::HierarchicalApproximateFairDropping::new(
-            0.1, wt, true
+            0.1, wt, true, Some(1000000.0)
         );
 
         (
@@ -674,4 +714,97 @@ mod t {
         assert!(d_cnt > 100);
         assert!(e_cnt > 100);
     }
+
+    #[test]
+    fn hafd_high_rate() {
+        init();
+        let (mut hwfq, b_ip, d_ip, e_ip) = make_test_tree();
+        let dst_ip = [42, 2, 0, 0];
+        let mut b_cnt = 0;
+        let mut d_cnt = 0;
+        let mut e_cnt = 0;
+
+        // Now enqueue a bunch but enqueue 8 b for every 5 c and 3 d.
+        let b_ingress_rate = 80;
+        let d_ingress_rate = 50;
+        let e_ingress_rate = 30;
+        
+        for _ in 0..10000 {
+            for _ in 0..b_ingress_rate {
+                hwfq.enq(Pkt {
+                    ip_hdr: etherparse::Ipv4Header::new(
+                        100,
+                        64,
+                        etherparse::IpNumber::Tcp,
+                        b_ip,
+                        dst_ip,
+                    ),
+                    buf: vec![0u8; 100],
+                })
+                .unwrap();
+            }
+            for _ in 0..d_ingress_rate {
+                hwfq.enq(Pkt {
+                    ip_hdr: etherparse::Ipv4Header::new(
+                        100,
+                        64,
+                        etherparse::IpNumber::Tcp,
+                        d_ip,
+                        dst_ip,
+                    ),
+                    buf: vec![0u8; 100],
+                })
+                .unwrap();
+            }
+            for _ in 0..e_ingress_rate {
+                hwfq.enq(Pkt {
+                    ip_hdr: etherparse::Ipv4Header::new(
+                        100,
+                        64,
+                        etherparse::IpNumber::Tcp,
+                        e_ip,
+                        dst_ip,
+                    ),
+                    buf: vec![0u8; 100],
+                })
+                .unwrap();
+            }
+
+            // Attempt to dequeue 3 packets.
+            for _ in 0..3 {
+                match hwfq.deq() {
+                    Ok(Some(p)) => {
+                        if p.ip_hdr.source == b_ip {
+                            b_cnt += 1;
+                        } else if p.ip_hdr.source == d_ip {
+                            d_cnt += 1;
+                        } else if p.ip_hdr.source == e_ip {
+                            e_cnt += 1;
+                        } else {
+                            panic!("unknown ip");
+                        }
+                    }
+                    Ok(None) => {},
+                    Err(e) => panic!("error: {:?}", e),
+                }
+            }
+        }
+
+        // should be d + e ~= 2 * b, e ~= 2 * d
+        dbg!(b_cnt, d_cnt, e_cnt);
+        println!("b_cnt: {}, d_cnt: {}, e_cnt: {}", b_cnt, d_cnt, e_cnt);
+        let sum_d_e = (d_cnt + e_cnt) as isize;
+        // This ratio should be 2.0.
+        let ratio_d_e_to_b = (sum_d_e as f64) / (b_cnt as f64);
+        assert!((ratio_d_e_to_b - 2.0).abs() < 0.1);
+        // This ratio should be 2.0.
+        let ratio_e_to_d = (e_cnt as f64) / (d_cnt as f64);
+        assert!((ratio_e_to_d - 2.0).abs() < 0.1);
+
+        // Assert that each aggregate sent more than 100 packets.
+        assert!(b_cnt > 100);
+        assert!(d_cnt > 100);
+        assert!(e_cnt > 100);
+    }
+
 }
