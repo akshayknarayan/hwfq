@@ -115,6 +115,11 @@ pub fn main() -> Result<(), Report> {
                 opt.sample_prob,
                 wt?,
                 !opt.receiver_weights,
+                Some(
+                    opt.rate_bytes_per_sec
+                        .ok_or(eyre!("Pacing rate is required to use scheduler"))? as f64,
+                ),
+
             );
             let s = Datapath::new(
                 &opt.listen_interface,
