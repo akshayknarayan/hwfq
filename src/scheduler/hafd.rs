@@ -118,7 +118,7 @@ impl ShadowBuffer {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         // If we are at capacity pop the oldest packet.
         let mut removed = None;
-        if self.inner.len() == self.max_packets {
+        if self.inner.len() >= self.max_packets {
             removed = self.inner.pop_front();
         }
         self.update_aggregate_occupancy(&p, removed);
@@ -162,7 +162,7 @@ impl ShadowBuffer {
     fn update_expected_occupancy(&mut self, pkt: &Pkt) {
         let aggregates = get_aggregates(pkt, &self.ip_to_aggregates, self.lookup_on_src_ip);
         // debug!("Aggregates: {:?}", aggregates);
-        let mut occupancy = self.max_packets as f64;
+        let mut occupancy = self.size() as f64;
         for aggregate in aggregates {
             let agg_weight = self.aggregate_to_weight.get(&aggregate).unwrap_or_else(|| {
                 panic!("Failed to get weight for aggregate: {}", aggregate)
@@ -222,7 +222,7 @@ impl ShadowBuffer {
     }
 
     pub fn is_constrained(&mut self, agg: &String) -> bool {
-        self.aggregate_occupancy.contains_key(agg)
+        self.aggregate_occupancy.contains_key(agg) && (self.occupancy(agg) > 100)
     }
 }
 
@@ -402,7 +402,7 @@ impl HierarchicalApproximateFairDropping {
             let mut new_rate = pkt.len() as f64 / time_since_rate_calc;
             new_rate = exponential_smooth(old_rate, new_rate, time_since_rate_calc, K);
             self.aggregate_to_update_and_ingress_rate.insert(aggregate.clone(), (SystemTime::now(), new_rate));
-            debug!("Aggregate Stats: Time {}, Ingress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), new_rate);
+            debug!("Aggregate Stats, Time {}, Aggregate {}, Ingress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), aggregate, new_rate);
         }
     }
 
@@ -417,32 +417,54 @@ impl HierarchicalApproximateFairDropping {
             let mut new_rate = pkt.len() as f64 / time_since_rate_calc;
             new_rate = exponential_smooth(old_rate, new_rate, time_since_rate_calc, K);
             self.aggregate_to_update_and_egress_rate.insert(aggregate.clone(), (SystemTime::now(), new_rate));
-            debug!("Aggregate Stats: Time {}, Egress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), new_rate);
+            debug!("Aggregate Stats, Time {}, Aggregate {}, Egress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), aggregate, new_rate);
         }
     }
 
     fn should_drop(&mut self, p: &Pkt) -> bool {
         let aggregates = get_aggregates(p, &self.ip_to_aggregates, self.lookup_on_src_ip);
         // Find the last active aggregate in the list and use its drop probability.
-        let mut last_active_agg = None;
+        let mut last_active_agg : Option<String> = None;
         // Walk through backwards and find the last constrained aggregate.
+        // let mut previous_agg : Option<String> = None;
+        // let reversed_aggs : Vec<String> = aggregates.iter().rev().map(|x| x.clone()).collect();
+        // debug!("Aggregates: {:?}", reversed_aggs);
+        // for (index, agg) in reversed_aggs.iter().enumerate() {
+        //     debug!("Reversed agg length: {}", reversed_aggs.len());
+        //     if index == reversed_aggs.len() - 1 {
+        //         debug!("First Index: {}, Aggregate: {}", index, agg);
+        //         last_active_agg = Some(agg.clone());
+        //         break;
+        //     }
+        //     else if index < reversed_aggs.len() - 1 {
+        //         debug!("Second Index: {}, Aggregate: {}", index, agg);
+        //         if self.shadow_buffer.is_constrained(&reversed_aggs[index+1]) {
+        //             last_active_agg = Some(agg.clone());
+        //             break;
+        //         }
+        //     }
+        // }
         for aggregate in aggregates.iter().rev() {
             if self.shadow_buffer.is_constrained(aggregate) {
-                last_active_agg = Some(aggregate);
+                last_active_agg = Some(aggregate.clone());
                 break;
             }
         }
         match last_active_agg {
             Some(last_active_agg) => {
-                let occupancy = self.shadow_buffer.occupancy(last_active_agg) as f64;
-                if occupancy < 30.0 {
-                    return false;
+                if self.shadow_buffer.aggregate_occupancy.contains_key(&last_active_agg) {
+                    let occupancy = self.shadow_buffer.occupancy(&last_active_agg) as f64;
+                    if occupancy < 30.0 {
+                        return false;
+                    }
+                    let expected_occupancy = self.shadow_buffer.expected_occupancy(&last_active_agg);
+                    let drop_prob = 1.0 - (expected_occupancy / occupancy) * (self.capacity_in_bytes / self.ingress_rate);
+                    let time_now_in_seconds = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64();
+                    debug!("Time {}, Src: {:?}, Occupancy: {}, Expected occupancy: {}, ingress rate: {}, egress rate: {}, drop prob: {}, queue length: {}, aggregate: {}", time_now_in_seconds, p.ip_hdr.source, occupancy, expected_occupancy, self.ingress_rate, self.egress_rate, drop_prob, self.inner.len(), last_active_agg);
+                    self.shadow_buffer.get_rand_f64() < drop_prob
+                } else {
+                    false
                 }
-                let expected_occupancy = self.shadow_buffer.expected_occupancy(last_active_agg);
-                let drop_prob = 1.0 - (expected_occupancy / occupancy) * (self.capacity_in_bytes / self.ingress_rate);
-                let time_now_in_seconds = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64();
-                debug!("Time {}, Src: {:?}, Occupancy: {}, Expected occupancy: {}, ingress rate: {}, egress rate: {}, drop prob: {}", time_now_in_seconds, p.ip_hdr.source, occupancy, expected_occupancy, self.ingress_rate, self.egress_rate, drop_prob);
-                self.shadow_buffer.get_rand_f64() < drop_prob
             }
             None => {false}
         }
