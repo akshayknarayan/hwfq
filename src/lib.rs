@@ -18,6 +18,7 @@ use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
 use std::process::Command;
 use tracing::{debug, info, trace};
 use tun_tap::Iface;
+use std::time::SystemTime;
 
 #[cfg(target_os = "linux")]
 mod ip_socket;
@@ -253,6 +254,7 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
                 .recv(&ticker_r, |bytes| {
                     let mut q = queue.try_borrow_mut().unwrap();
                     accum_tokens += bytes.unwrap() as isize;
+                    debug!("Accumtokenupdate Time: {:?}, accum_tokens: {}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), accum_tokens);
                     while accum_tokens > 0 {
                         match q.deq() {
                             Ok(None) => {
