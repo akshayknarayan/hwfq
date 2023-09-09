@@ -13,10 +13,23 @@ use tracing::debug;
 use tracing::info;
 use rand::rngs::StdRng;
 
-// TODO: What is a good K?
+const MAX_PACKETS : usize = 1000;
+
+const ALPHA: f64 = 1.7;
+const BETA: f64 = 1.8;
 const K: f64 = 0.1;
 
-const MAX_PACKETS: usize = 1000;
+const UPDATE_FREQUENCY: f64 = 160.0;
+
+const TARGET_QUEUE_LENGTH: f64 = 50.0;
+
+const MIN_M_FAIR: f64 = 10.0;
+const MAX_M_FAIR: f64 = MAX_PACKETS as f64 * 100.0;
+
+fn exponential_smooth(old_value: f64, new_value: f64, time_since: f64, k: f64) -> f64 {
+    // (1.0 - f64::powf(E, -time_since / k)) * new_value + f64::powf(E, -time_since / k) * old_value
+    (old_value + new_value) / 2.0
+}
 
 fn get_ip(packet: &Pkt, lookup_on_src_ip: bool) -> [u8; 4] {
     if lookup_on_src_ip {
@@ -48,10 +61,6 @@ fn ip_set_to_agg_name(ips: &[Vec<u32>]) -> String {
 
 }
 
-fn exponential_smooth(old_value: f64, new_value: f64, time_since: f64, k: f64) -> f64 {
-    (1.0 - f64::powf(E, -time_since / k)) * new_value + f64::powf(E, -time_since / k) * old_value
-}
-
 fn get_aggregates(packet: &Pkt, ip_to_aggregates: &HashMap<u32, Vec<String>>, lookup_on_src_ip: bool) -> Vec<String> {
     let src_ip = get_ip(packet, lookup_on_src_ip);
 
@@ -79,10 +88,13 @@ pub struct ShadowBuffer {
     aggregate_occupancy: HashMap<String, usize>,
     // Aggregate to weight map.
     aggregate_to_weight: HashMap<String, f64>,
+    // Aggregate to weight map.
+    aggregate_to_weight_share: HashMap<String, f64>,
     // Aggregate to siblings map.
     aggregate_to_siblings: HashMap<String, Vec<String>>,
-    /// Maps from an aggregate to its expected occupancy in the shadow buffer.
-    aggregate_to_expected_occupancy: HashMap<String, f64>,
+    /// The time of the last update to m_fair.
+    last_update_time: SystemTime,
+    m_fair: f64,
     /// The random number generator.
     rng: StdRng,
     lookup_on_src_ip: bool,
@@ -101,7 +113,9 @@ impl ShadowBuffer {
             aggregate_occupancy: HashMap::new(),
             aggregate_to_weight,
             aggregate_to_siblings,
-            aggregate_to_expected_occupancy: HashMap::new(),
+            aggregate_to_weight_share: HashMap::new(),
+            last_update_time: SystemTime::now(),
+            m_fair: MIN_M_FAIR,
             rng: StdRng::seed_from_u64(0),
             lookup_on_src_ip,
             inner: Default::default(),
@@ -109,6 +123,7 @@ impl ShadowBuffer {
     }
 
     pub fn sample(&mut self, p: &Pkt) -> Result<(), Report> {
+        self.update_weight_shares(&p);
         if self.get_rand_f64() < self.packet_sample_prob {
             self.enq(p.clone())?;
         }
@@ -122,7 +137,7 @@ impl ShadowBuffer {
             removed = self.inner.pop_front();
         }
         self.update_aggregate_occupancy(&p, removed);
-        self.update_expected_occupancy(&p);
+        self.update_weight_shares(&p);
         self.inner.push_back(p);
 
         Ok(())
@@ -158,63 +173,61 @@ impl ShadowBuffer {
             }
         }
     }
-    
-    fn update_expected_occupancy(&mut self, pkt: &Pkt) {
-        let aggregates = get_aggregates(pkt, &self.ip_to_aggregates, self.lookup_on_src_ip);
-        // debug!("Aggregates: {:?}", aggregates);
-        let mut occupancy = self.size() as f64;
-        for aggregate in aggregates {
-            let agg_weight = self.aggregate_to_weight.get(&aggregate).unwrap_or_else(|| {
-                panic!("Failed to get weight for aggregate: {}", aggregate)
-            }).clone();
-            // Get the total weight of all active siblings.
-            let (total_weight, inactive_occupancy) = self.get_total_active_weight_and_inactive_occupancy(&aggregate);
 
-            // Remove the inactive occupancy from consideration.
-            occupancy -= inactive_occupancy;
-
-            let weight_share = agg_weight / total_weight;
-            // debug!("Weight share: {}", weight_share);
-            occupancy = weight_share * occupancy;
-            // debug!("Occupancy: {}", occupancy);
-            // debug!("Total shadow buffer occupancy: {}", self.size() as f64);
-            self.aggregate_to_expected_occupancy
-                .insert(aggregate.clone(), occupancy);
+    fn clamp_m_fair(&mut self) {
+        if self.m_fair < MIN_M_FAIR {
+            self.m_fair = MIN_M_FAIR;
+        } else if self.m_fair > MAX_M_FAIR {
+            self.m_fair = MAX_M_FAIR;
         }
     }
 
+    pub fn update_mfair(&mut self, queue_length : usize, last_queue_length : usize) {
+        self.m_fair = self.m_fair + ALPHA * (last_queue_length as f64 - TARGET_QUEUE_LENGTH) - BETA * (queue_length as f64 - TARGET_QUEUE_LENGTH);
+        self.clamp_m_fair();
+    }
+
+    pub fn should_update_mfair(&self) -> bool {
+        let time_since_last_m_fair_update = self.last_update_time.elapsed().unwrap().as_secs_f64();
+        time_since_last_m_fair_update > 1.0 / UPDATE_FREQUENCY
+    }
+
     // Gets the total weight and inactive occupancy of the aggregate and its siblings in the tree. Ignores non-active aggregates.
-    fn get_total_active_weight_and_inactive_occupancy(&mut self, agg: &String) -> (f64, f64) {
+    fn get_total_weight(&mut self, agg: &String) -> f64 {
         let mut total_weight = *self
             .aggregate_to_weight
             .get(agg)
             .unwrap_or_else(|| panic!("Failed to get weight for aggregate: {}", agg));
-        let mut inactive_occupancy = 0.0;
         for sibling in self
             .aggregate_to_siblings
             .get(agg)
             .unwrap_or_else(|| panic!("Failed to get siblings for aggregate: {}", agg))
             .clone()
         {
-            if self.is_constrained(&sibling) {
-                total_weight += self.aggregate_to_weight.get(&sibling).unwrap_or_else(|| {
-                    panic!("Failed to get weight for sibling aggregate: {}", sibling)
-                });
-            } else {
-                inactive_occupancy += self.aggregate_occupancy.get(&sibling).unwrap_or_else(|| {
-                    &0
-                }).clone() as f64;
-            }
+            total_weight += self.aggregate_to_weight.get(&sibling).unwrap_or_else(|| {
+                panic!("Failed to get weight for sibling aggregate: {}", sibling)
+            });
         }
-        (total_weight, inactive_occupancy)
+        total_weight
+    }
+
+    pub fn update_weight_shares(&mut self, p: &Pkt) {
+        let aggregates = get_aggregates(&p, &self.ip_to_aggregates, self.lookup_on_src_ip);
+        let mut current_weight = 1.0;
+        for aggregate in aggregates {
+            let total_weight = self.get_total_weight(&aggregate);
+            let weight_share = current_weight * self.aggregate_to_weight.get(&aggregate).unwrap_or_else(|| panic!("Failed to get weight for aggregate: {}", aggregate)) / total_weight;
+            current_weight = weight_share;
+            self.aggregate_to_weight_share.insert(aggregate.clone(), weight_share);
+        }
     }
 
     pub fn occupancy(&self, aggregate: &String) -> usize {
         self.aggregate_occupancy.get(aggregate).unwrap_or_else(|| panic!("Failed to get aggregate occupancy for aggregate: {}", aggregate)).clone()
     }
 
-    pub fn expected_occupancy(&self, aggregate: &String) -> f64 {
-        self.aggregate_to_expected_occupancy.get(aggregate).unwrap_or_else(|| panic!("Failed to get expected aggregate occupancy for aggregate: {}", aggregate)).clone()
+    pub fn weight_share(&self, aggregate: &String) -> f64 {
+        self.aggregate_to_weight_share.get(aggregate).unwrap_or_else(|| panic!("Failed to get weight share for aggregate: {}", aggregate)).clone()
     }
 
     pub fn get_rand_f64(&mut self) -> f64 {
@@ -222,7 +235,7 @@ impl ShadowBuffer {
     }
 
     pub fn is_constrained(&mut self, agg: &String) -> bool {
-        self.aggregate_occupancy.contains_key(agg) && (self.occupancy(agg) > 100)
+        self.aggregate_occupancy.contains_key(agg) && (self.occupancy(agg) > 10)
     }
 }
 
@@ -234,20 +247,17 @@ pub struct HierarchicalApproximateFairDropping {
     /// Maps from a single IP to the list of aggregates it belongs to, from root to leaf.
     ip_to_aggregates: HashMap<u32, Vec<String>>,
     shadow_buffer: ShadowBuffer,
-    ingress_rate: f64,
-    egress_rate: f64,
-    last_ingress_update: SystemTime,
-    last_egress_update: SystemTime,
     lookup_on_src_ip: bool,
-    packets_dropped: u32,
-    capacity_in_bytes: f64,
     aggregate_to_update_and_ingress_rate: HashMap<String, (SystemTime, f64)>,
     aggregate_to_update_and_egress_rate: HashMap<String, (SystemTime, f64)>,
+    last_egress_update: SystemTime,
+    last_ingress_update: SystemTime,
+    last_queue_length: usize,
     inner: VecDeque<Pkt>,
 }
 
 impl HierarchicalApproximateFairDropping {
-    pub fn new(packet_sample_prob: f64, tree: WeightTree, lookup_on_src_ip: bool, capacity_in_bytes: Option<f64>) -> Self {
+    pub fn new(packet_sample_prob: f64, tree: WeightTree, lookup_on_src_ip: bool) -> Self {
         let mut aggregate_to_siblings = HashMap::new();
         let mut ip_to_aggregates: HashMap<u32, Vec<String>> = HashMap::new();
         let mut weight_map: HashMap<String, f64> = HashMap::new();
@@ -364,60 +374,51 @@ impl HierarchicalApproximateFairDropping {
         Self {
             ip_to_aggregates,
             shadow_buffer,
-            ingress_rate: 0.0,
-            egress_rate: 0.0,
-            last_ingress_update: SystemTime::now(),
-            last_egress_update: SystemTime::now(),
             lookup_on_src_ip,
-            packets_dropped: 0,
-            capacity_in_bytes: capacity_in_bytes.unwrap(),
             aggregate_to_update_and_ingress_rate: HashMap::new(),
             aggregate_to_update_and_egress_rate: HashMap::new(),
+            last_egress_update: SystemTime::now(),
+            last_ingress_update: SystemTime::now(),
+            last_queue_length: 0,
             inner: Default::default(),
         }
     }
 
-    fn update_ingress_rate(&mut self, pkt: &Pkt) {
-        let time_since_rate_calc = self.last_ingress_update.elapsed().unwrap().as_secs_f64();
-        let new_rate = pkt.len() as f64 / time_since_rate_calc;
-        self.ingress_rate = exponential_smooth(self.ingress_rate, new_rate, time_since_rate_calc, K);
-        self.last_ingress_update = SystemTime::now();
-    }
-
-    fn update_egress_rate(&mut self, pkt: &Pkt) {
-        let time_since_rate_calc = self.last_egress_update.elapsed().unwrap().as_secs_f64();
-        let new_rate = pkt.len() as f64 / time_since_rate_calc;
-        self.egress_rate = exponential_smooth(self.egress_rate, new_rate, time_since_rate_calc, K);
-        self.last_egress_update = SystemTime::now();
-    }
-
     fn update_aggregate_ingress_rate(&mut self, pkt: &Pkt) {
-        let aggregates = get_aggregates(pkt, &self.ip_to_aggregates, self.lookup_on_src_ip);
-        for aggregate in aggregates {
-            if !(self.aggregate_to_update_and_ingress_rate.contains_key(&aggregate)) {
-                self.aggregate_to_update_and_ingress_rate.insert(aggregate.clone(), (SystemTime::now(), 0.0));
+        if SystemTime::now().duration_since(self.last_ingress_update).unwrap().as_secs_f64() > 1.0 {
+            self.last_ingress_update = SystemTime::now();
+
+            let aggregates = get_aggregates(pkt, &self.ip_to_aggregates, self.lookup_on_src_ip);
+            for aggregate in aggregates {
+                if !(self.aggregate_to_update_and_ingress_rate.contains_key(&aggregate)) {
+                    self.aggregate_to_update_and_ingress_rate.insert(aggregate.clone(), (SystemTime::now(), 0.0));
+                }
+                let (last_ingress_update, old_rate) = self.aggregate_to_update_and_ingress_rate.get(&aggregate).unwrap_or_else(|| panic!("Failed to get ingress rate for aggregate: {}", aggregate)).clone();
+                let time_since_rate_calc = last_ingress_update.elapsed().unwrap().as_secs_f64();
+                let mut new_rate = pkt.len() as f64 / time_since_rate_calc;
+                new_rate = exponential_smooth(old_rate, new_rate, time_since_rate_calc, K);
+                self.aggregate_to_update_and_ingress_rate.insert(aggregate.clone(), (SystemTime::now(), new_rate));
+                debug!("Aggregate Stats, Time {}, Aggregate {}, Ingress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), aggregate, new_rate);
             }
-            let (last_ingress_update, old_rate) = self.aggregate_to_update_and_ingress_rate.get(&aggregate).unwrap_or_else(|| panic!("Failed to get ingress rate for aggregate: {}", aggregate)).clone();
-            let time_since_rate_calc = last_ingress_update.elapsed().unwrap().as_secs_f64();
-            let mut new_rate = pkt.len() as f64 / time_since_rate_calc;
-            new_rate = exponential_smooth(old_rate, new_rate, time_since_rate_calc, K);
-            self.aggregate_to_update_and_ingress_rate.insert(aggregate.clone(), (SystemTime::now(), new_rate));
-            debug!("Aggregate Stats, Time {}, Aggregate {}, Ingress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), aggregate, new_rate);
         }
     }
 
     fn update_aggregate_egress_rate(&mut self, pkt: &Pkt) {
-        let aggregates = get_aggregates(pkt, &self.ip_to_aggregates, self.lookup_on_src_ip);
-        for aggregate in aggregates {
-            if !(self.aggregate_to_update_and_egress_rate.contains_key(&aggregate)) {
-                self.aggregate_to_update_and_egress_rate.insert(aggregate.clone(), (SystemTime::now(), 0.0));
+        if SystemTime::now().duration_since(self.last_egress_update).unwrap().as_secs_f64() > 1.0 {
+            self.last_egress_update = SystemTime::now();
+            
+            let aggregates = get_aggregates(pkt, &self.ip_to_aggregates, self.lookup_on_src_ip);
+            for aggregate in aggregates {
+                if !(self.aggregate_to_update_and_egress_rate.contains_key(&aggregate)) {
+                    self.aggregate_to_update_and_egress_rate.insert(aggregate.clone(), (SystemTime::now(), 0.0));
+                }
+                let (last_egress_update, old_rate) = self.aggregate_to_update_and_egress_rate.get(&aggregate).unwrap_or_else(|| panic!("Failed to get ingress rate for aggregate: {}", aggregate)).clone();
+                let time_since_rate_calc = last_egress_update.elapsed().unwrap().as_secs_f64();
+                let mut new_rate = pkt.len() as f64 / time_since_rate_calc;
+                new_rate = exponential_smooth(old_rate, new_rate, time_since_rate_calc, K);
+                self.aggregate_to_update_and_egress_rate.insert(aggregate.clone(), (SystemTime::now(), new_rate));
+                debug!("Aggregate Stats, Time {}, Aggregate {}, Egress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), aggregate, new_rate);
             }
-            let (last_egress_update, old_rate) = self.aggregate_to_update_and_egress_rate.get(&aggregate).unwrap_or_else(|| panic!("Failed to get ingress rate for aggregate: {}", aggregate)).clone();
-            let time_since_rate_calc = last_egress_update.elapsed().unwrap().as_secs_f64();
-            let mut new_rate = pkt.len() as f64 / time_since_rate_calc;
-            new_rate = exponential_smooth(old_rate, new_rate, time_since_rate_calc, K);
-            self.aggregate_to_update_and_egress_rate.insert(aggregate.clone(), (SystemTime::now(), new_rate));
-            debug!("Aggregate Stats, Time {}, Aggregate {}, Egress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), aggregate, new_rate);
         }
     }
 
@@ -425,26 +426,9 @@ impl HierarchicalApproximateFairDropping {
         let aggregates = get_aggregates(p, &self.ip_to_aggregates, self.lookup_on_src_ip);
         // Find the last active aggregate in the list and use its drop probability.
         let mut last_active_agg : Option<String> = None;
-        // Walk through backwards and find the last constrained aggregate.
-        // let mut previous_agg : Option<String> = None;
-        // let reversed_aggs : Vec<String> = aggregates.iter().rev().map(|x| x.clone()).collect();
-        // debug!("Aggregates: {:?}", reversed_aggs);
-        // for (index, agg) in reversed_aggs.iter().enumerate() {
-        //     debug!("Reversed agg length: {}", reversed_aggs.len());
-        //     if index == reversed_aggs.len() - 1 {
-        //         debug!("First Index: {}, Aggregate: {}", index, agg);
-        //         last_active_agg = Some(agg.clone());
-        //         break;
-        //     }
-        //     else if index < reversed_aggs.len() - 1 {
-        //         debug!("Second Index: {}, Aggregate: {}", index, agg);
-        //         if self.shadow_buffer.is_constrained(&reversed_aggs[index+1]) {
-        //             last_active_agg = Some(agg.clone());
-        //             break;
-        //         }
-        //     }
-        // }
         for aggregate in aggregates.iter().rev() {
+            last_active_agg = Some(aggregate.clone());
+            break;
             if self.shadow_buffer.is_constrained(aggregate) {
                 last_active_agg = Some(aggregate.clone());
                 break;
@@ -457,10 +441,9 @@ impl HierarchicalApproximateFairDropping {
                     if occupancy < 30.0 {
                         return false;
                     }
-                    let expected_occupancy = self.shadow_buffer.expected_occupancy(&last_active_agg);
-                    let drop_prob = 1.0 - (expected_occupancy / occupancy) * (self.capacity_in_bytes / self.ingress_rate);
-                    let time_now_in_seconds = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64();
-                    debug!("Time {}, Src: {:?}, Occupancy: {}, Expected occupancy: {}, ingress rate: {}, egress rate: {}, drop prob: {}, queue length: {}, aggregate: {}", time_now_in_seconds, p.ip_hdr.source, occupancy, expected_occupancy, self.ingress_rate, self.egress_rate, drop_prob, self.inner.len(), last_active_agg);
+                    let weight_share = self.shadow_buffer.weight_share(&last_active_agg);
+                    let drop_prob = 1.0 - (self.shadow_buffer.m_fair / occupancy) * weight_share;
+                    debug!("Time {}, Src: {:?}, M_fair: {}, Occupancy: {}, Weight Share: {}, drop prob: {}, queue length: {}, aggregate: {}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), p.ip_hdr.source, self.shadow_buffer.m_fair, occupancy, weight_share, drop_prob, self.inner.len(), last_active_agg);
                     self.shadow_buffer.get_rand_f64() < drop_prob
                 } else {
                     false
@@ -474,13 +457,16 @@ impl HierarchicalApproximateFairDropping {
 impl Scheduler for HierarchicalApproximateFairDropping {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         self.shadow_buffer.sample(&p)?;
-        self.update_ingress_rate(&p);
         self.update_aggregate_ingress_rate(&p);
+
+        if self.shadow_buffer.should_update_mfair() {
+            self.shadow_buffer.last_update_time = SystemTime::now();
+            self.shadow_buffer.update_mfair(self.inner.len(), self.last_queue_length);
+            self.last_queue_length = self.inner.len();
+        }
 
         if !self.should_drop(&p) {
             self.inner.push_back(p.clone());
-        } else {
-            self.packets_dropped += 1;
         }
         Ok(())
     }
@@ -490,7 +476,6 @@ impl Scheduler for HierarchicalApproximateFairDropping {
             return Ok(None);
         }
         let p = self.inner.pop_front().unwrap();
-        self.update_egress_rate(&p);
         self.update_aggregate_egress_rate(&p);
         Ok(Some(p))
     }
@@ -540,7 +525,7 @@ mod t {
 
         dbg!(wt.get_min_quantum().unwrap());
         let hwfq = super::HierarchicalApproximateFairDropping::new(
-            0.1, wt, true, Some(1000000.0)
+            0.1, wt, true
         );
 
         (

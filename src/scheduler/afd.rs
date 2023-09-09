@@ -1,20 +1,25 @@
 use super::Scheduler;
 use crate::Pkt;
 use color_eyre::eyre::Report;
-use std::collections::HashSet;
 use std::collections::VecDeque;
 use tracing::debug;
 use tracing::error;
 use std::time::SystemTime;
+use std::collections::HashMap;
 use std::f64::consts::E;
 
-const MAX_PACKETS : usize = 500;
+const MAX_PACKETS : usize = 200;
 
+const ALPHA: f64 = 1.7;
+const BETA: f64 = 1.8;
 const K: f64 = 0.1;
 
-fn exponential_smooth(old_value: f64, new_value: f64, time_since: f64, k: f64) -> f64 {
-    (1.0 - f64::powf(E, -time_since / k)) * new_value + f64::powf(E, -time_since / k) * old_value
-}
+const UPDATE_FREQUENCY: f64 = 160.0;
+
+const TARGET_QUEUE_LENGTH: f64 = 50.0;
+
+const MIN_M_FAIR: f64 = 10.0;
+const MAX_M_FAIR: f64 = MAX_PACKETS as f64;
 
 #[derive(Debug)]
 pub struct ShadowBuffer {
@@ -22,8 +27,16 @@ pub struct ShadowBuffer {
     packet_sample_prob: f64,
     /// The maximum number of packets in the shadow buffer.
     max_packets: usize,
+    /// The time of the last update to m_fair.
+    last_update_time: SystemTime,
+    m_fair: f64,
     /// The shadow buffer.
     inner: VecDeque<Pkt>,
+}
+
+fn exponential_smooth(old_value: f64, new_value: f64, time_since: f64, k: f64) -> f64 {
+    // (1.0 - f64::powf(E, -time_since / k)) * new_value + f64::powf(E, -time_since / k) * old_value
+    (old_value + new_value) / 2.0
 }
 
 impl ShadowBuffer {
@@ -31,6 +44,8 @@ impl ShadowBuffer {
         Self {
             packet_sample_prob,
             max_packets,
+            m_fair: 0.0,
+            last_update_time: SystemTime::now(),
             inner: Default::default(),
         }
     }
@@ -57,13 +72,26 @@ impl ShadowBuffer {
         self.inner.len()
     }
 
-    pub fn num_unique_flows(&self) -> usize {
-        let src_ips_seen = self.inner.iter().map(|p| p.ip_hdr.source).collect::<HashSet<[u8; 4]>>();
-        src_ips_seen.len()
-    }
-
     fn dbg(&self) {
         debug!(?self.inner);
+    }
+
+    pub fn update_mfair(&mut self, queue_length : usize, last_queue_length : usize) {
+        self.m_fair = self.m_fair + ALPHA * (last_queue_length as f64 - TARGET_QUEUE_LENGTH) - BETA * (queue_length as f64 - TARGET_QUEUE_LENGTH);
+        // self.clamp_m_fair();
+    }
+
+    pub fn should_update_mfair(&self) -> bool {
+        let time_since_last_m_fair_update = self.last_update_time.elapsed().unwrap().as_secs_f64();
+        time_since_last_m_fair_update > 1.0 / UPDATE_FREQUENCY
+    }
+
+    fn clamp_m_fair(&mut self) {
+        if self.m_fair < MIN_M_FAIR {
+            self.m_fair = MIN_M_FAIR;
+        } else if self.m_fair > MAX_M_FAIR {
+            self.m_fair = MAX_M_FAIR;
+        }
     }
 
     // Walks through the buffer and finds the total number of packets that share a source IP with the given packet.
@@ -85,10 +113,9 @@ impl ShadowBuffer {
 #[derive(Debug)]
 pub struct ApproximateFairDropping {
     shadow_buffer: ShadowBuffer,
-    ingress_rate: f64,
-    last_update_time: SystemTime,
-    capacity: f64,
-    last_capacity_update_time: SystemTime,
+    last_queue_length: usize,
+    flow_to_update_and_ingress_rate: HashMap<[u8; 4], (SystemTime, f64)>,
+    flow_to_update_and_egress_rate: HashMap<[u8; 4], (SystemTime, f64)>,
     inner: VecDeque<Pkt>,
 }
 
@@ -101,42 +128,44 @@ impl ApproximateFairDropping {
 
         Self {
             shadow_buffer,
-            ingress_rate: 0.0,
-            last_update_time: SystemTime::now(),
-            capacity: 0.0,
-            last_capacity_update_time: SystemTime::now(),
+            last_queue_length: 0,
+            flow_to_update_and_ingress_rate: HashMap::new(),
+            flow_to_update_and_egress_rate: HashMap::new(),
             inner: Default::default(),
         }
     }
 
     fn should_drop(&mut self, p: &Pkt) -> bool {
         let occupancy = self.shadow_buffer.occupancy(p) as f64;
-        let b = self.shadow_buffer.size() as f64;
-        let n = self.shadow_buffer.num_unique_flows() as f64;
-        let drop_prob = 1.0 - (b / (n * occupancy)) * self.capacity / self.ingress_rate;
-        // debug!("IP {:?}",
-        //     p.ip_hdr.source
-        // );
-        // debug!("  occupancy: {}", occupancy);
-        // debug!("  b: {}", b);
-        // debug!("  n: {}", n);
-        // debug!("  drop_prob: {}", drop_prob);
+        let drop_prob = 1.0 - self.shadow_buffer.m_fair / occupancy;
+        debug!("Time {}, Src: {:?}, MFair: {}, Occupancy: {}, drop prob: {}, queue length: {}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), p.ip_hdr.source, self.shadow_buffer.m_fair, occupancy, drop_prob, self.inner.len());
         rand::random::<f64>() < drop_prob
     }
 
     fn update_ingress_rate(&mut self, p: &Pkt) {
-        let time_since_rate_calc = self.last_update_time.elapsed().unwrap().as_secs_f64();
-        let new_rate = p.len() as f64 / time_since_rate_calc;
-        self.ingress_rate = exponential_smooth(self.ingress_rate, new_rate, time_since_rate_calc, K);
-        self.last_update_time = SystemTime::now();
+        if !(self.flow_to_update_and_ingress_rate.contains_key(&p.ip_hdr.source)) {
+            self.flow_to_update_and_ingress_rate.insert(p.ip_hdr.source, (SystemTime::now(), 0.0));
+        }
+        let (last_ingress_update, old_rate) = self.flow_to_update_and_ingress_rate.get(&p.ip_hdr.source).unwrap_or_else(|| panic!("Failed to get ingress rate for flow: {:?}", p.ip_hdr.source.clone())).clone();
+        let time_since_rate_calc = last_ingress_update.elapsed().unwrap().as_secs_f64();
+        let mut new_rate = p.len() as f64 / time_since_rate_calc;
+        new_rate = exponential_smooth(old_rate, new_rate, time_since_rate_calc, K);
+        self.flow_to_update_and_ingress_rate.insert(p.ip_hdr.source, (SystemTime::now(), new_rate));
+        debug!("Aggregate Stats, Time {}, Flow {:?}, Ingress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), p.ip_hdr.source.clone(), new_rate);
     }
 
-    fn update_capacity(&mut self, p: &Pkt) {
-        let time_since_rate_calc = self.last_capacity_update_time.elapsed().unwrap().as_secs_f64();
-        let new_rate = p.len() as f64 / time_since_rate_calc;
-        self.capacity = exponential_smooth(self.capacity, new_rate, time_since_rate_calc, K);
-        self.last_capacity_update_time = SystemTime::now();
+    fn update_egress_rate(&mut self, p: &Pkt) {
+        if !(self.flow_to_update_and_egress_rate.contains_key(&p.ip_hdr.source)) {
+            self.flow_to_update_and_egress_rate.insert(p.ip_hdr.source, (SystemTime::now(), 0.0));
+        }
+        let (last_egress_update, old_rate) = self.flow_to_update_and_egress_rate.get(&p.ip_hdr.source).unwrap_or_else(|| panic!("Failed to get egress rate for flow: {:?}", p.ip_hdr.source.clone())).clone();
+        let time_since_rate_calc = last_egress_update.elapsed().unwrap().as_secs_f64();
+        let mut new_rate = p.len() as f64 / time_since_rate_calc;
+        new_rate = exponential_smooth(old_rate, new_rate, time_since_rate_calc, K);
+        self.flow_to_update_and_egress_rate.insert(p.ip_hdr.source, (SystemTime::now(), new_rate));
+        debug!("Aggregate Stats, Time {}, Flow {:?}, Egress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), p.ip_hdr.source.clone(), new_rate);
     }
+
 }
 
 impl Scheduler for ApproximateFairDropping {
@@ -150,6 +179,13 @@ impl Scheduler for ApproximateFairDropping {
 
         self.update_ingress_rate(&p);
 
+        if self.shadow_buffer.should_update_mfair() {
+            self.shadow_buffer.last_update_time = SystemTime::now();
+            self.shadow_buffer.update_mfair(self.inner.len(), self.last_queue_length);
+            self.last_queue_length = self.inner.len();
+        }
+
+
         if !self.should_drop(&p) {
             self.inner.push_back(p.clone());
         }
@@ -161,7 +197,7 @@ impl Scheduler for ApproximateFairDropping {
             return Ok(None);
         }
         let p = self.inner.pop_front().unwrap();
-        self.update_capacity(&p);
+        self.update_egress_rate(&p);
         Ok(Some(p))
     }
 
