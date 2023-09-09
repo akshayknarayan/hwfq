@@ -2,7 +2,7 @@ use color_eyre::{
     eyre::{eyre, Report},
     Help,
 };
-use hwfq::scheduler::{Drr, Fifo, HierarchicalDeficitWeightedRoundRobin, HierarchicalApproximateFairDropping, ApproximateFairDropping};
+use hwfq::scheduler::{Drr, Fifo, HierarchicalDeficitWeightedRoundRobin, HierarchicalApproximateFairDropping, ApproximateFairDropping, WeightedApproximateFairDropping};
 use hwfq::scheduler::common::WeightTree;
 use hwfq::Datapath;
 use structopt::StructOpt;
@@ -108,6 +108,24 @@ pub fn main() -> Result<(), Report> {
             )?;
             s.run().unwrap();
         }
+        "wafd" => {
+            let cfg = opt.weights_cfg.unwrap();
+            let wt = WeightTree::from_file(&cfg);
+            let wafd = WeightedApproximateFairDropping::new(
+                opt.sample_prob,
+                wt?
+            );
+            let s = Datapath::new(
+                &opt.listen_interface,
+                &opt.fwd_address,
+                Some(
+                    opt.rate_bytes_per_sec
+                        .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
+                ),
+                wafd,
+            )?;
+            s.run().unwrap();
+        }
         "hafd" => {
             let cfg = opt.weights_cfg.unwrap();
             let wt = WeightTree::from_file(&cfg);
@@ -115,11 +133,6 @@ pub fn main() -> Result<(), Report> {
                 opt.sample_prob,
                 wt?,
                 !opt.receiver_weights,
-                Some(
-                    opt.rate_bytes_per_sec
-                        .ok_or(eyre!("Pacing rate is required to use scheduler"))? as f64,
-                ),
-
             );
             let s = Datapath::new(
                 &opt.listen_interface,
