@@ -1,5 +1,4 @@
 use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
-use tracing::debug;
 
 pub const MAX_NUM_CHILDREN: usize = 8;
 /// A tree of weights and IP addresses to match them against.
@@ -240,7 +239,33 @@ impl WeightTree {
 
     pub fn weight(&self) -> usize {
         match self {
-            WeightTree::NonLeaf { weight, .. } | WeightTree::Leaf { weight, ..} => *weight,
+            WeightTree::NonLeaf { weight, .. } | WeightTree::Leaf { weight, .. } => *weight,
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod t {
+    pub(crate) fn init() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            tracing_subscriber::fmt::init();
+            color_eyre::install().unwrap();
+        })
+    }
+
+    #[test]
+    fn parse_ip() {
+        init();
+
+        let p = "42.1.2.15";
+        let m = super::parse_ip(p).unwrap();
+        assert_eq!(m, u32::from_be_bytes([42, 1, 2, 15]));
+
+        let p = "1.1.1.1";
+        let m = super::parse_ip(p).unwrap();
+        assert_eq!(m, u32::from_be_bytes([1, 1, 1, 1]));
     }
 }
