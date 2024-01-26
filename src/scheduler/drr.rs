@@ -1,7 +1,7 @@
 use super::{fnv, Scheduler};
 use crate::Pkt;
 use color_eyre::eyre::{ensure, Report};
-use std::collections::{VecDeque, HashMap};
+use std::collections::{hash_map::Entry, HashMap, VecDeque};
 
 // Define constant max number of queues.
 const MAX_QUEUES: usize = 32;
@@ -44,24 +44,23 @@ impl Scheduler for Drr {
         );
 
         // hash p into a queue
-        let flow_id = fnv(
-            p.ip_hdr.source,
-            p.ip_hdr.destination,
-            MAX_QUEUES as u64,
-        );
-        if self.queue_map.contains_key(&flow_id) {
-            let queue_id = self.queue_map.get(&flow_id).unwrap();
-            self.curr_qsizes[*queue_id] += p.buf.len();
-            self.queues[*queue_id].push_back(p);
-            return Ok(());
-        } else {
-            assert!(self.num_queues < MAX_QUEUES);
-            self.queue_map.insert(flow_id, self.num_queues);
-            self.num_queues += 1;
-            let queue_id = self.queue_map.get(&flow_id).unwrap();
-            self.curr_qsizes[*queue_id] += p.buf.len();
-            self.queues[*queue_id].push_back(p);
-            return Ok(());
+        let flow_id = fnv(p.ip_hdr.source, p.ip_hdr.destination, MAX_QUEUES as u64);
+        match self.queue_map.entry(flow_id) {
+            Entry::Vacant(e) => {
+                assert!(self.num_queues < MAX_QUEUES);
+                e.insert(self.num_queues);
+                let queue_id = self.num_queues;
+                self.num_queues += 1;
+                self.curr_qsizes[queue_id] += p.buf.len();
+                self.queues[queue_id].push_back(p);
+                Ok(())
+            }
+            Entry::Occupied(e) => {
+                let queue_id = e.get();
+                self.curr_qsizes[*queue_id] += p.buf.len();
+                self.queues[*queue_id].push_back(p);
+                Ok(())
+            }
         }
     }
 
