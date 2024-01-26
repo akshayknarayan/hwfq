@@ -1,20 +1,18 @@
 use super::Scheduler;
+use crate::scheduler::common::WeightTree;
+use crate::scheduler::common::MAX_NUM_CHILDREN;
 use crate::Pkt;
-use color_eyre::eyre::{ensure, Report};
+use color_eyre::eyre::{ensure, eyre, Report};
 #[cfg(feature = "hwfq-audit")]
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use tracing::debug;
-use crate::scheduler::common::WeightTree;
-use crate::scheduler::common::MAX_NUM_CHILDREN;
-use crate::scheduler::common::parse_ip;
 
 /// Implement a hierarchical deficit round-robin [`Scheduler`].
 ///
 /// See [`HierarchicalDeficitWeightedRoundRobin::new`].
 #[derive(Debug)]
 pub struct HierarchicalDeficitWeightedRoundRobin {
-    limit_bytes: usize,
     lookup_on_src_ip: bool,
     tree: FlowTree,
 }
@@ -23,7 +21,7 @@ impl HierarchicalDeficitWeightedRoundRobin {
     /// Construct a HDWRR scheduler.
     ///
     /// # Arguments
-    /// - `limit_bytes`: The *total size* of the queue.
+    /// - `limit_bytes`: The *size of each leaf queue*.
     /// - `lookup_on_src_ip`: Whether to use the source or destination IP address to match on the
     /// weight tree. Using the source IP address (`true`) will schedule based on sender weights,
     /// and using the destination IP address (`false`) will use receiver weights.
@@ -34,27 +32,19 @@ impl HierarchicalDeficitWeightedRoundRobin {
         weight_tree: WeightTree,
     ) -> Result<Self, Report> {
         Ok(Self {
-            limit_bytes,
             lookup_on_src_ip,
-            tree: weight_tree.into_flow_tree()?,
+            tree: weight_tree.into_flow_tree(limit_bytes)?,
         })
     }
 }
 
 impl Scheduler for HierarchicalDeficitWeightedRoundRobin {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
-        let pkt_len = p.buf.len();
-        ensure!(
-            self.tree.tot_qlen() + pkt_len <= self.limit_bytes,
-            "Dropping packet"
-        );
-
         if self.lookup_on_src_ip {
-            self.tree.enqueue::<true>(p);
+            self.tree.enqueue::<true>(p)
         } else {
-            self.tree.enqueue::<false>(p);
+            self.tree.enqueue::<false>(p)
         }
-        Ok(())
     }
 
     fn deq(&mut self) -> Result<Option<Pkt>, Report> {
@@ -78,11 +68,13 @@ impl Scheduler for HierarchicalDeficitWeightedRoundRobin {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum FlowTree {
     Leaf {
         deficit: usize,
         quanta: usize,
         curr_qlen: usize,
+        limit_bytes: usize,
         queue: VecDeque<Pkt>,
     },
     NonLeaf {
@@ -110,16 +102,19 @@ enum FlowTree {
 
 impl std::fmt::Debug for FlowTree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        match self {
-            &FlowTree::Leaf {
-                quanta, ref queue, ..
+        match *self {
+            FlowTree::Leaf {
+                quanta,
+                ref queue,
+                limit_bytes,
+                ..
             } => f
                 .debug_struct("FlowTree::Leaf")
                 .field("quanta", &quanta)
                 .field("queue_len", &queue.len())
+                .field("limit_bytes", &limit_bytes)
                 .finish_non_exhaustive(),
-
-            &FlowTree::NonLeaf {
+            FlowTree::NonLeaf {
                 quanta,
                 ref classify,
                 ref children,
@@ -152,17 +147,23 @@ impl FlowTree {
         }
     }
 
-    fn enqueue<const USE_SRC_IP: bool>(&mut self, p: Pkt) {
-        match self {
-            &mut FlowTree::Leaf {
+    fn enqueue<const USE_SRC_IP: bool>(&mut self, p: Pkt) -> Result<(), Report> {
+        match *self {
+            FlowTree::Leaf {
                 ref mut queue,
                 ref mut curr_qlen,
+                limit_bytes,
                 ..
             } => {
-                *curr_qlen += p.buf.len();
-                queue.push_back(p);
+                if *curr_qlen + p.buf.len() > limit_bytes {
+                    Err(eyre!("Dropping packet"))
+                } else {
+                    *curr_qlen += p.buf.len();
+                    queue.push_back(p);
+                    Ok(())
+                }
             }
-            &mut FlowTree::NonLeaf {
+            FlowTree::NonLeaf {
                 ref mut children,
                 ref mut classify,
                 ref mut curr_qlen,
@@ -172,6 +173,9 @@ impl FlowTree {
                 ref mut audit_tracking,
                 ..
             } => {
+                let mut idx = None;
+                // we actually want the range loop because we use the same index into children.
+                #[allow(clippy::needless_range_loop)]
                 for i in 0..children.len() {
                     if classify[i].is_empty() {
                         continue;
@@ -184,24 +188,29 @@ impl FlowTree {
                     };
 
                     if classify[i].iter().any(|i| ip == *i) {
-                        *curr_qlen += p.buf.len();
-
-                        #[cfg(feature = "hwfq-audit")]
-                        if !curr_audit_state[i] && children[i].tot_qlen() == 0 {
-                            curr_audit_state[i] = true;
-                            if !audit_tracking.contains_key(curr_audit_state) {
-                                audit_tracking
-                                    .insert(*curr_audit_state, [0usize; MAX_NUM_CHILDREN]);
-                            }
-                        }
-
-                        children[i].enqueue::<USE_SRC_IP>(p);
-                        return;
+                        idx = Some(i);
+                        break;
                     }
                 }
 
-                debug!(ip_hdr = ?p.ip_hdr, "Packet did not match any classifications");
-                return;
+                if let Some(i) = idx {
+                    let plen = p.buf.len();
+                    children[i].enqueue::<USE_SRC_IP>(p)?;
+                    *curr_qlen += plen;
+
+                    #[cfg(feature = "hwfq-audit")]
+                    if !curr_audit_state[i] && children[i].tot_qlen() == 0 {
+                        curr_audit_state[i] = true;
+                        if !audit_tracking.contains_key(curr_audit_state) {
+                            audit_tracking.insert(*curr_audit_state, [0usize; MAX_NUM_CHILDREN]);
+                        }
+                    }
+
+                    Ok(())
+                } else {
+                    debug!(ip_hdr = ?p.ip_hdr, "Packet did not match any classifications");
+                    Err(eyre!("Packet did not match any classifications"))
+                }
             }
         }
     }
@@ -224,31 +233,29 @@ impl FlowTree {
     }
 
     fn dequeue(&mut self) -> Option<Pkt> {
-        match self {
-            &mut FlowTree::Leaf {
+        match *self {
+            FlowTree::Leaf {
                 ref mut deficit,
                 ref mut curr_qlen,
                 ref mut queue,
                 ..
             } => {
-                if !queue.is_empty() {
-                    if *deficit >= queue.front().unwrap().buf.len() {
-                        let p = queue.pop_front().unwrap();
-                        if queue.is_empty() {
-                            *deficit = 0;
-                            *curr_qlen = 0;
-                        } else {
-                            *deficit -= p.buf.len();
-                            *curr_qlen -= p.buf.len();
-                        }
-
-                        return Some(p);
+                if !queue.is_empty() && *deficit >= queue.front().unwrap().buf.len() {
+                    let p = queue.pop_front().unwrap();
+                    if queue.is_empty() {
+                        *deficit = 0;
+                        *curr_qlen = 0;
+                    } else {
+                        *deficit -= p.buf.len();
+                        *curr_qlen -= p.buf.len();
                     }
-                }
 
-                None
+                    Some(p)
+                } else {
+                    None
+                }
             }
-            &mut FlowTree::NonLeaf {
+            FlowTree::NonLeaf {
                 ref mut deficit,
                 ref mut curr_qlen,
                 ref mut curr_child,
@@ -320,21 +327,26 @@ impl WeightTree {
     // transform this weight tree with weights into a flow tree with quanta.
     // this allocates quanta to children satisfying the following:
     // quantum = sum(child.quantum / child.weight)
-    fn into_flow_tree(self) -> Result<FlowTree, Report> {
+    fn into_flow_tree(self, limit_bytes: usize) -> Result<FlowTree, Report> {
         let mut min_quantum = self.get_min_quantum()?;
         if min_quantum < 500 {
             min_quantum *= 500 / min_quantum;
         }
 
-        self.into_flow_tree_with_quantum(min_quantum)
+        self.into_flow_tree_with_quantum(min_quantum, limit_bytes)
     }
 
-    fn into_flow_tree_with_quantum(self, quantum: usize) -> Result<FlowTree, Report> {
+    fn into_flow_tree_with_quantum(
+        self,
+        quantum: usize,
+        limit_bytes: usize,
+    ) -> Result<FlowTree, Report> {
         Ok(match self {
             WeightTree::Leaf { .. } => FlowTree::Leaf {
                 quanta: quantum,
                 deficit: 0,
                 curr_qlen: 0,
+                limit_bytes,
                 queue: Default::default(),
             },
             WeightTree::NonLeaf {
@@ -353,7 +365,7 @@ impl WeightTree {
                     // since sum_weights might not be a divisor of quantum.
                     let child_quantum = (wt * quantum) / sum_weights;
 
-                    let ft = c.into_flow_tree_with_quantum(child_quantum)?;
+                    let ft = c.into_flow_tree_with_quantum(child_quantum, limit_bytes)?;
                     let slot_ref = slot.as_mut();
                     *slot_ref = ft;
                     Ok::<_, Report>(())
@@ -364,6 +376,7 @@ impl WeightTree {
                         quanta: 0,
                         deficit: 0,
                         curr_qlen: 0,
+                        limit_bytes,
                         queue: Default::default(),
                     })
                 });
@@ -394,18 +407,9 @@ impl WeightTree {
 #[cfg(test)]
 mod t {
     use super::{Scheduler, WeightTree};
+    use crate::scheduler::common::t::init;
     use crate::Pkt;
     use tracing::info;
-
-    fn init() {
-        use std::sync::Once;
-        static INIT: Once = Once::new();
-
-        INIT.call_once(|| {
-            tracing_subscriber::fmt::init();
-            color_eyre::install().unwrap();
-        })
-    }
 
     #[test]
     fn weight_tree() {
@@ -420,7 +424,7 @@ mod t {
             .unwrap();
         dbg!(&wt);
 
-        let ft = wt.into_flow_tree().unwrap();
+        let ft = wt.into_flow_tree(0).unwrap();
         dbg!(ft);
 
         let _wt = WeightTree::parent(1)
@@ -473,11 +477,8 @@ mod t {
                     .unwrap(),
             )
             .unwrap();
-
-        dbg!(wt.get_min_quantum().unwrap());
-        dbg!(wt.clone().into_flow_tree().unwrap());
         let hwfq = super::HierarchicalDeficitWeightedRoundRobin::new(
-            150_000, /* 100 x 1500 bytes */
+            15_000, /* 10 x 1500 bytes */
             true, wt,
         )
         .unwrap();
@@ -622,19 +623,6 @@ mod t {
         let e = e_cnt as isize;
         let twice_d = (d_cnt * 2) as isize;
         assert!((twice_d - e).abs() < 10);
-    }
-
-    #[test]
-    fn parse_ip() {
-        init();
-
-        let p = "42.1.2.15";
-        let m = super::parse_ip(&p).unwrap();
-        assert_eq!(m, u32::from_be_bytes([42, 1, 2, 15]));
-
-        let p = "1.1.1.1";
-        let m = super::parse_ip(&p).unwrap();
-        assert_eq!(m, u32::from_be_bytes([1, 1, 1, 1]));
     }
 
     #[test]
@@ -793,5 +781,56 @@ root:
         let e = e_cnt as isize;
         let twice_d = (d_cnt * 2) as isize;
         assert!((twice_d - e).abs() < 5);
+    }
+
+    #[test]
+    fn queue_isolation() {
+        init();
+
+        let (mut hwfq, b_ip, d_ip, e_ip) = make_test_tree();
+        let dst_ip = [42, 2, 0, 0];
+
+        assert_eq!(hwfq.tree.tot_qlen(), 0);
+        // enqueue a bunch of packets
+        while hwfq
+            .enq(Pkt {
+                ip_hdr: etherparse::Ipv4Header::new(
+                    100,
+                    64,
+                    etherparse::IpNumber::Tcp,
+                    b_ip,
+                    dst_ip,
+                ),
+                buf: vec![0u8; 100],
+            })
+            .is_ok()
+        {}
+
+        assert_eq!(hwfq.tree.tot_qlen(), 15000);
+
+        assert!(hwfq
+            .enq(Pkt {
+                ip_hdr: etherparse::Ipv4Header::new(
+                    100,
+                    64,
+                    etherparse::IpNumber::Tcp,
+                    d_ip,
+                    dst_ip
+                ),
+                buf: vec![0u8; 100],
+            })
+            .is_ok());
+        assert!(hwfq
+            .enq(Pkt {
+                ip_hdr: etherparse::Ipv4Header::new(
+                    100,
+                    64,
+                    etherparse::IpNumber::Tcp,
+                    e_ip,
+                    dst_ip
+                ),
+                buf: vec![0u8; 100],
+            })
+            .is_ok());
     }
 }
