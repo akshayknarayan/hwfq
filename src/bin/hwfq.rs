@@ -81,6 +81,7 @@ pub fn main() -> Result<(), Report> {
                 !opt.receiver_weights,
                 wt?,
             )?;
+            print!("{:?}", &hwfq);
             let s = Datapath::new(
                 &opt.listen_interface,
                 &opt.fwd_address,
