@@ -147,6 +147,12 @@ impl FlowTree {
         }
     }
 
+    fn deficit(&self) -> usize {
+        match self {
+            &FlowTree::NonLeaf { deficit, .. } | &FlowTree::Leaf { deficit, .. } => deficit,
+        }
+    }
+
     fn enqueue<const USE_SRC_IP: bool>(&mut self, p: Pkt) -> Result<(), Report> {
         match *self {
             FlowTree::Leaf {
@@ -156,7 +162,7 @@ impl FlowTree {
                 ..
             } => {
                 if *curr_qlen + p.buf.len() > limit_bytes {
-                    Err(eyre!("Dropping packet"))
+                    Err(eyre!(format!("Dropping packet from ip: {:?}", p.ip_hdr.source)))
                 } else {
                     *curr_qlen += p.buf.len();
                     queue.push_back(p);
@@ -250,8 +256,16 @@ impl FlowTree {
                         *curr_qlen -= p.buf.len();
                     }
 
+                    debug!(?p.ip_hdr.source, "    Dequeued packet");
                     Some(p)
                 } else {
+                    if queue.is_empty() {
+                        debug!("    Queue is empty");
+                    } else if *deficit < queue.front().unwrap().buf.len() {
+                        debug!("    Deficit is too small: deficit={}, packet size={}, packet_ip={:?}", deficit, queue.front().unwrap().buf.len(), queue.front().unwrap().ip_hdr.source);
+                    } else {
+                        debug!("    Unknown error");
+                    }
                     None
                 }
             }
@@ -272,6 +286,8 @@ impl FlowTree {
                 }
 
                 loop {
+                    debug!(curr_child = *curr_child, "Attempting dequeue from child");
+                    debug!("    child deficit={}, child_queue_len={} child quanta={}", children[*curr_child].deficit() , children[*curr_child].tot_qlen(), children[*curr_child].quanta());
                     if children[*curr_child].tot_qlen() > 0 {
                         // is our sub-leaf currently dequeueing packets that fit within credits we already gave it?
                         if let Some(p) = children[*curr_child].dequeue() {
@@ -314,6 +330,9 @@ impl FlowTree {
                             // we don't have any deficit to give. ask for more.
                             return None;
                         }
+                    } else {
+                        // child is empty. ask for more deficit.
+                        debug!("    child is empty");
                     }
 
                     *curr_child = (*curr_child + 1) % children.len();
@@ -332,6 +351,7 @@ impl WeightTree {
         if min_quantum < 500 {
             min_quantum *= 500 / min_quantum;
         }
+        // let min_quantum = 3000;
 
         self.into_flow_tree_with_quantum(min_quantum, limit_bytes)
     }
@@ -478,7 +498,7 @@ mod t {
             )
             .unwrap();
         let hwfq = super::HierarchicalDeficitWeightedRoundRobin::new(
-            15_000, /* 10 x 1500 bytes */
+            150_000, /* 10 x 1500 bytes */
             true, wt,
         )
         .unwrap();
@@ -491,43 +511,48 @@ mod t {
         )
     }
 
+    fn make_test_tree_simple() -> (
+        super::HierarchicalDeficitWeightedRoundRobin,
+        [u8; 4],
+        [u8; 4],
+    ) {
+        let all_ips = [
+            u32::from_be_bytes([42, 1, 1, 1]),
+            u32::from_be_bytes([42, 1, 2, 1]),
+        ];
+        let wt = WeightTree::parent(1)
+            .add_child(vec![all_ips[0]], WeightTree::leaf(2)) // "B"
+            .unwrap()
+            .add_child(vec![all_ips[1]], WeightTree::leaf(1)) // "C"
+            .unwrap();
+        let hwfq = super::HierarchicalDeficitWeightedRoundRobin::new(
+            150_000, /* 10 x 1500 bytes */
+            true, wt,
+        )
+        .unwrap();
+
+        (
+            hwfq,
+            u32::to_be_bytes(all_ips[0]),
+            u32::to_be_bytes(all_ips[1]),
+        )
+    }
+
     #[test]
     fn hwfq_basic() {
         init();
         let (mut hwfq, b_ip, d_ip, e_ip) = make_test_tree();
         let dst_ip = [42, 2, 0, 0];
 
-        assert_eq!(hwfq.tree.tot_qlen(), 0, "");
-        // enqueue a bunch of packets
-        for _ in 0..100 {
-            hwfq.enq(Pkt {
+        let packet_size = 100;
+
+        fn enqueue_packet(d: &mut super::HierarchicalDeficitWeightedRoundRobin, src_ip: [u8; 4], dst_ip: [u8; 4]) {
+            d.enq(Pkt {
                 ip_hdr: etherparse::Ipv4Header::new(
                     100,
                     64,
                     etherparse::IpNumber::Tcp,
-                    b_ip,
-                    dst_ip,
-                ),
-                buf: vec![0u8; 100],
-            })
-            .unwrap();
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::Tcp,
-                    d_ip,
-                    dst_ip,
-                ),
-                buf: vec![0u8; 100],
-            })
-            .unwrap();
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::Tcp,
-                    e_ip,
+                    src_ip,
                     dst_ip,
                 ),
                 buf: vec![0u8; 100],
@@ -535,12 +560,26 @@ mod t {
             .unwrap();
         }
 
-        assert_eq!(hwfq.tree.tot_qlen(), 300 * 100, "");
+        assert_eq!(hwfq.tree.tot_qlen(), 0, "");
+        // enqueue a bunch of packets
+        let num_packets_to_enqueue = 1000;
+        for _ in 0..num_packets_to_enqueue {
+            // Enqueue b.
+            enqueue_packet(&mut hwfq, b_ip, dst_ip);
+            // Enqueue d.
+            enqueue_packet(&mut hwfq, d_ip, dst_ip);
+            // Enqueue e.
+            enqueue_packet(&mut hwfq, e_ip, dst_ip);
+        }
+
+        assert_eq!(hwfq.tree.tot_qlen(), 3 * num_packets_to_enqueue * packet_size, "");
 
         let mut b_cnt = 0;
         let mut d_cnt = 0;
         let mut e_cnt = 0;
-        for _ in 0..180 {
+
+        let num_packets_to_dequeue = 500;
+        for _ in 0..num_packets_to_dequeue {
             let p = hwfq.deq().unwrap().unwrap();
             if p.ip_hdr.source == b_ip {
                 b_cnt += 1;
@@ -555,12 +594,76 @@ mod t {
 
         // should be d + e ~= 2 * b, e ~= 2 * d
         dbg!(b_cnt, d_cnt, e_cnt);
-        let sum_d_e = (d_cnt + e_cnt) as isize;
-        let twice_b = (b_cnt * 2) as isize;
-        assert!((sum_d_e - twice_b).abs() < 5);
-        let e = e_cnt as isize;
-        let twice_d = (d_cnt * 2) as isize;
-        assert!((twice_d - e).abs() < 5);
+        assert!(((d_cnt + e_cnt) as f64 / b_cnt as f64 - 2.0) < 0.06, "The ratio should have been 2.0 but was {}", (d_cnt + e_cnt) as f64 / b_cnt as f64);
+        assert!(d_cnt as f64 / e_cnt as f64 - 2.0 < 0.06, "The ratio should have been 2.0 but was {}", (d_cnt) as f64 / e_cnt as f64);
+
+        info!(?hwfq.tree, "tree");
+    }
+
+    #[test]
+    fn hwfq_bad_example() {
+        // This test is designed to mimic the bad example we ran into.
+        // We have a weight ratio of 2 (b) to 1 (c). We enqueue a bunch of b packets,
+        // then start to enqueue c packets at a much higher rate than b packets while dequeuing.
+
+        init();
+        let (mut hwfq, b_ip, c_ip) = make_test_tree_simple();
+        let dst_ip = [42, 2, 0, 0];
+
+        fn enqueue_packet(d: &mut super::HierarchicalDeficitWeightedRoundRobin, src_ip: [u8; 4], dst_ip: [u8; 4]) {
+            let _ = d.enq(Pkt {
+                ip_hdr: etherparse::Ipv4Header::new(
+                    100,
+                    64,
+                    etherparse::IpNumber::Tcp,
+                    src_ip,
+                    dst_ip,
+                ),
+                buf: vec![0u8; 100],
+            });
+        }
+
+        // enqueue a bunch of b packets.
+        let num_packets_to_enqueue = 1000;
+        for _ in 0..num_packets_to_enqueue {
+            // Enqueue b.
+            enqueue_packet(&mut hwfq, b_ip, dst_ip);
+        }
+
+        assert!(hwfq.tree.tot_qlen() == 1000 * 100, "tot_qlen: {}", hwfq.tree.tot_qlen());
+
+        let mut b_cnt = 0;
+        let mut c_cnt: usize = 0;
+
+        let dequeue_rate = 5;
+        let c_enqueue_rate = dequeue_rate;
+        // Now start to enqueue c packets at a high rate while dequeuing.
+        for _ in 0..100 {
+
+            // Enqueue c.
+            for _ in 0..c_enqueue_rate {
+                enqueue_packet(&mut hwfq, c_ip, dst_ip);
+            }
+
+            // Enqueue b.
+            enqueue_packet(&mut hwfq, b_ip, dst_ip);
+
+            // Dequeue.
+            for _ in 0..dequeue_rate {
+                let p = hwfq.deq().unwrap().unwrap();
+                if p.ip_hdr.source == b_ip {
+                    b_cnt += 1;
+                } else if p.ip_hdr.source == c_ip {
+                    c_cnt += 1;
+                } else {
+                    panic!("unknown ip");
+                }
+            }
+        }
+
+        assert!((b_cnt as f64 / c_cnt as f64 - 2.0).abs() < 0.06, "The ratio should have been 2.0 but was {}", (b_cnt) as f64 / c_cnt as f64);
+        info!("b_cnt: {}, c_cnt: {}", b_cnt, c_cnt);
+
 
         info!(?hwfq.tree, "tree");
     }
