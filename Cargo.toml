@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 bin = ["structopt", "tracing-subscriber"]
+afd = []
 hwfq-audit = []
 
 [dependencies]
