@@ -3,6 +3,7 @@ use crate::scheduler::common::parse_ip;
 use crate::scheduler::common::WeightTree;
 use crate::Pkt;
 use color_eyre::eyre::Report;
+use rand::rngs::StdRng;
 use rand::RngCore;
 use rand::SeedableRng;
 use std::collections::HashMap;
@@ -11,7 +12,6 @@ use std::f64::consts::E;
 use std::time::SystemTime;
 use tracing::debug;
 use tracing::info;
-use rand::rngs::StdRng;
 
 // TODO: What is a good K?
 const K: f64 = 0.1;
@@ -28,10 +28,10 @@ fn get_ip(packet: &Pkt, lookup_on_src_ip: bool) -> [u8; 4] {
 
 // Hashes a vector of IPs to a string aggregate name.
 fn ip_set_to_agg_name(ips: &[Vec<u32>]) -> String {
-    let mut new_ips = ips.clone().to_vec();
+    let mut new_ips = ips.to_vec();
     info!("New ips: {:?}", new_ips);
     // Remove all 0 length IPs.
-    new_ips.retain(|x| x.len() > 0);
+    new_ips.retain(|x| !x.is_empty());
     // Flatten the vector of IPs into a single vector.
     let mut flat_ips = vec![];
     for ip in new_ips {
@@ -45,14 +45,17 @@ fn ip_set_to_agg_name(ips: &[Vec<u32>]) -> String {
         .map(|x| x.to_string())
         .collect::<Vec<String>>()
         .join("_")
-
 }
 
 fn exponential_smooth(old_value: f64, new_value: f64, time_since: f64, k: f64) -> f64 {
     (1.0 - f64::powf(E, -time_since / k)) * new_value + f64::powf(E, -time_since / k) * old_value
 }
 
-fn get_aggregates(packet: &Pkt, ip_to_aggregates: &HashMap<u32, Vec<String>>, lookup_on_src_ip: bool) -> Vec<String> {
+fn get_aggregates(
+    packet: &Pkt,
+    ip_to_aggregates: &HashMap<u32, Vec<String>>,
+    lookup_on_src_ip: bool,
+) -> Vec<String> {
     let src_ip = get_ip(packet, lookup_on_src_ip);
 
     // Turn the source IP into a String joined with periods.
@@ -91,9 +94,14 @@ pub struct ShadowBuffer {
 }
 
 impl ShadowBuffer {
-    pub fn new(packet_sample_prob: f64, max_packets: usize, ip_to_aggregates: &HashMap<u32, Vec<String>>,
-        aggregate_to_weight: HashMap<String, f64>, aggregate_to_siblings: HashMap<String, Vec<String>>,
-        lookup_on_src_ip: bool) -> Self {
+    pub fn new(
+        packet_sample_prob: f64,
+        max_packets: usize,
+        ip_to_aggregates: &HashMap<u32, Vec<String>>,
+        aggregate_to_weight: HashMap<String, f64>,
+        aggregate_to_siblings: HashMap<String, Vec<String>>,
+        lookup_on_src_ip: bool,
+    ) -> Self {
         Self {
             packet_sample_prob,
             max_packets,
@@ -145,37 +153,66 @@ impl ShadowBuffer {
             if !self.aggregate_occupancy.contains_key(&aggregate) {
                 self.aggregate_occupancy.insert(aggregate.clone(), 0);
             }
-            self.aggregate_occupancy.insert(aggregate.clone(), self.aggregate_occupancy.get(&aggregate).unwrap_or_else(|| panic!("Failed to get aggregate occupancy for aggregate: {}", aggregate)).clone() + 1);
+            self.aggregate_occupancy.insert(
+                aggregate.clone(),
+                self.aggregate_occupancy.get(&aggregate).unwrap_or_else(|| {
+                    panic!(
+                        "Failed to get aggregate occupancy for aggregate: {}",
+                        aggregate
+                    )
+                }) + 1,
+            );
         }
 
         if let Some(removed_packet) = removed_packet {
-            let aggregates = get_aggregates(&removed_packet, &self.ip_to_aggregates, self.lookup_on_src_ip);
+            let aggregates = get_aggregates(
+                &removed_packet,
+                &self.ip_to_aggregates,
+                self.lookup_on_src_ip,
+            );
             for aggregate in aggregates {
-                self.aggregate_occupancy.insert(aggregate.clone(), self.aggregate_occupancy.get(&aggregate).unwrap_or_else(|| panic!("Failed to get aggregate occupancy for aggregate: {}", aggregate)).clone() - 1);
-                if self.aggregate_occupancy.get(&aggregate).unwrap_or_else(|| panic!("Failed to get aggregate occupancy for aggregate: {}", aggregate)).clone() == 0 {
+                self.aggregate_occupancy.insert(
+                    aggregate.clone(),
+                    self.aggregate_occupancy.get(&aggregate).unwrap_or_else(|| {
+                        panic!(
+                            "Failed to get aggregate occupancy for aggregate: {}",
+                            aggregate
+                        )
+                    }) - 1,
+                );
+                if *self.aggregate_occupancy.get(&aggregate).unwrap_or_else(|| {
+                    panic!(
+                        "Failed to get aggregate occupancy for aggregate: {}",
+                        aggregate
+                    )
+                }) == 0
+                {
                     self.aggregate_occupancy.remove(&aggregate);
                 }
             }
         }
     }
-    
+
     fn update_expected_occupancy(&mut self, pkt: &Pkt) {
         let aggregates = get_aggregates(pkt, &self.ip_to_aggregates, self.lookup_on_src_ip);
         // debug!("Aggregates: {:?}", aggregates);
         let mut occupancy = self.size() as f64;
         for aggregate in aggregates {
-            let agg_weight = self.aggregate_to_weight.get(&aggregate).unwrap_or_else(|| {
-                panic!("Failed to get weight for aggregate: {}", aggregate)
-            }).clone();
+            let agg_weight = *self
+                .aggregate_to_weight
+                .get(&aggregate)
+                .unwrap_or_else(|| panic!("Failed to get weight for aggregate: {}", aggregate));
+
             // Get the total weight of all active siblings.
-            let (total_weight, inactive_occupancy) = self.get_total_active_weight_and_inactive_occupancy(&aggregate);
+            let (total_weight, inactive_occupancy) =
+                self.get_total_active_weight_and_inactive_occupancy(&aggregate);
 
             // Remove the inactive occupancy from consideration.
             occupancy -= inactive_occupancy;
 
             let weight_share = agg_weight / total_weight;
             // debug!("Weight share: {}", weight_share);
-            occupancy = weight_share * occupancy;
+            occupancy *= weight_share;
             // debug!("Occupancy: {}", occupancy);
             // debug!("Total shadow buffer occupancy: {}", self.size() as f64);
             self.aggregate_to_expected_occupancy
@@ -201,20 +238,31 @@ impl ShadowBuffer {
                     panic!("Failed to get weight for sibling aggregate: {}", sibling)
                 });
             } else {
-                inactive_occupancy += self.aggregate_occupancy.get(&sibling).unwrap_or_else(|| {
-                    &0
-                }).clone() as f64;
+                inactive_occupancy += *self.aggregate_occupancy.get(&sibling).unwrap_or(&0) as f64;
             }
         }
         (total_weight, inactive_occupancy)
     }
 
     pub fn occupancy(&self, aggregate: &String) -> usize {
-        self.aggregate_occupancy.get(aggregate).unwrap_or_else(|| panic!("Failed to get aggregate occupancy for aggregate: {}", aggregate)).clone()
+        *self.aggregate_occupancy.get(aggregate).unwrap_or_else(|| {
+            panic!(
+                "Failed to get aggregate occupancy for aggregate: {}",
+                aggregate
+            )
+        })
     }
 
     pub fn expected_occupancy(&self, aggregate: &String) -> f64 {
-        self.aggregate_to_expected_occupancy.get(aggregate).unwrap_or_else(|| panic!("Failed to get expected aggregate occupancy for aggregate: {}", aggregate)).clone()
+        *self
+            .aggregate_to_expected_occupancy
+            .get(aggregate)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Failed to get expected aggregate occupancy for aggregate: {}",
+                    aggregate
+                )
+            })
     }
 
     pub fn get_rand_f64(&mut self) -> f64 {
@@ -247,7 +295,12 @@ pub struct HierarchicalApproximateFairDropping {
 }
 
 impl HierarchicalApproximateFairDropping {
-    pub fn new(packet_sample_prob: f64, tree: WeightTree, lookup_on_src_ip: bool, capacity_in_bytes: Option<f64>) -> Self {
+    pub fn new(
+        packet_sample_prob: f64,
+        tree: WeightTree,
+        lookup_on_src_ip: bool,
+        capacity_in_bytes: Option<f64>,
+    ) -> Self {
         let mut aggregate_to_siblings = HashMap::new();
         let mut ip_to_aggregates: HashMap<u32, Vec<String>> = HashMap::new();
         let mut weight_map: HashMap<String, f64> = HashMap::new();
@@ -271,7 +324,7 @@ impl HierarchicalApproximateFairDropping {
                     let agg = ip_set_to_agg_name(&ip_array);
                     let mut all_aggs = aggregates.to_vec();
                     all_aggs.push(agg.clone());
-                    weight_map.insert(agg.clone(), weight as f64);
+                    weight_map.insert(agg, weight as f64);
                     ip_to_aggregates.insert(ips[0], all_aggs.clone());
                     // aggregate_to_siblings.insert(agg, vec![]);
                 }
@@ -358,8 +411,14 @@ impl HierarchicalApproximateFairDropping {
             info!("  {}: {:?}", k, v);
         }
 
-        let shadow_buffer =
-            ShadowBuffer::new(packet_sample_prob, MAX_PACKETS, &ip_to_aggregates, weight_map.clone(), aggregate_to_siblings.clone(), lookup_on_src_ip);
+        let shadow_buffer = ShadowBuffer::new(
+            packet_sample_prob,
+            MAX_PACKETS,
+            &ip_to_aggregates,
+            weight_map.clone(),
+            aggregate_to_siblings.clone(),
+            lookup_on_src_ip,
+        );
 
         Self {
             ip_to_aggregates,
@@ -380,7 +439,8 @@ impl HierarchicalApproximateFairDropping {
     fn update_ingress_rate(&mut self, pkt: &Pkt) {
         let time_since_rate_calc = self.last_ingress_update.elapsed().unwrap().as_secs_f64();
         let new_rate = pkt.len() as f64 / time_since_rate_calc;
-        self.ingress_rate = exponential_smooth(self.ingress_rate, new_rate, time_since_rate_calc, K);
+        self.ingress_rate =
+            exponential_smooth(self.ingress_rate, new_rate, time_since_rate_calc, K);
         self.last_ingress_update = SystemTime::now();
     }
 
@@ -394,37 +454,73 @@ impl HierarchicalApproximateFairDropping {
     fn update_aggregate_ingress_rate(&mut self, pkt: &Pkt) {
         let aggregates = get_aggregates(pkt, &self.ip_to_aggregates, self.lookup_on_src_ip);
         for aggregate in aggregates {
-            if !(self.aggregate_to_update_and_ingress_rate.contains_key(&aggregate)) {
-                self.aggregate_to_update_and_ingress_rate.insert(aggregate.clone(), (SystemTime::now(), 0.0));
+            if !(self
+                .aggregate_to_update_and_ingress_rate
+                .contains_key(&aggregate))
+            {
+                self.aggregate_to_update_and_ingress_rate
+                    .insert(aggregate.clone(), (SystemTime::now(), 0.0));
             }
-            let (last_ingress_update, old_rate) = self.aggregate_to_update_and_ingress_rate.get(&aggregate).unwrap_or_else(|| panic!("Failed to get ingress rate for aggregate: {}", aggregate)).clone();
+            let (last_ingress_update, old_rate) = *self
+                .aggregate_to_update_and_ingress_rate
+                .get(&aggregate)
+                .unwrap_or_else(|| {
+                    panic!("Failed to get ingress rate for aggregate: {}", aggregate)
+                });
             let time_since_rate_calc = last_ingress_update.elapsed().unwrap().as_secs_f64();
             let mut new_rate = pkt.len() as f64 / time_since_rate_calc;
             new_rate = exponential_smooth(old_rate, new_rate, time_since_rate_calc, K);
-            self.aggregate_to_update_and_ingress_rate.insert(aggregate.clone(), (SystemTime::now(), new_rate));
-            debug!("Aggregate Stats, Time {}, Aggregate {}, Ingress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), aggregate, new_rate);
+            self.aggregate_to_update_and_ingress_rate
+                .insert(aggregate.clone(), (SystemTime::now(), new_rate));
+            debug!(
+                "Aggregate Stats, Time {}, Aggregate {}, Ingress Rate: {:?}",
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64(),
+                aggregate,
+                new_rate
+            );
         }
     }
 
     fn update_aggregate_egress_rate(&mut self, pkt: &Pkt) {
         let aggregates = get_aggregates(pkt, &self.ip_to_aggregates, self.lookup_on_src_ip);
         for aggregate in aggregates {
-            if !(self.aggregate_to_update_and_egress_rate.contains_key(&aggregate)) {
-                self.aggregate_to_update_and_egress_rate.insert(aggregate.clone(), (SystemTime::now(), 0.0));
+            if !(self
+                .aggregate_to_update_and_egress_rate
+                .contains_key(&aggregate))
+            {
+                self.aggregate_to_update_and_egress_rate
+                    .insert(aggregate.clone(), (SystemTime::now(), 0.0));
             }
-            let (last_egress_update, old_rate) = self.aggregate_to_update_and_egress_rate.get(&aggregate).unwrap_or_else(|| panic!("Failed to get ingress rate for aggregate: {}", aggregate)).clone();
+            let (last_egress_update, old_rate) = *self
+                .aggregate_to_update_and_egress_rate
+                .get(&aggregate)
+                .unwrap_or_else(|| {
+                    panic!("Failed to get ingress rate for aggregate: {}", aggregate)
+                });
             let time_since_rate_calc = last_egress_update.elapsed().unwrap().as_secs_f64();
             let mut new_rate = pkt.len() as f64 / time_since_rate_calc;
             new_rate = exponential_smooth(old_rate, new_rate, time_since_rate_calc, K);
-            self.aggregate_to_update_and_egress_rate.insert(aggregate.clone(), (SystemTime::now(), new_rate));
-            debug!("Aggregate Stats, Time {}, Aggregate {}, Egress Rate: {:?}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), aggregate, new_rate);
+            self.aggregate_to_update_and_egress_rate
+                .insert(aggregate.clone(), (SystemTime::now(), new_rate));
+            debug!(
+                "Aggregate Stats, Time {}, Aggregate {}, Egress Rate: {:?}",
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64(),
+                aggregate,
+                new_rate
+            );
         }
     }
 
     fn should_drop(&mut self, p: &Pkt) -> bool {
         let aggregates = get_aggregates(p, &self.ip_to_aggregates, self.lookup_on_src_ip);
         // Find the last active aggregate in the list and use its drop probability.
-        let mut last_active_agg : Option<String> = None;
+        let mut last_active_agg: Option<String> = None;
         // Walk through backwards and find the last constrained aggregate.
         // let mut previous_agg : Option<String> = None;
         // let reversed_aggs : Vec<String> = aggregates.iter().rev().map(|x| x.clone()).collect();
@@ -452,21 +548,31 @@ impl HierarchicalApproximateFairDropping {
         }
         match last_active_agg {
             Some(last_active_agg) => {
-                if self.shadow_buffer.aggregate_occupancy.contains_key(&last_active_agg) {
+                if self
+                    .shadow_buffer
+                    .aggregate_occupancy
+                    .contains_key(&last_active_agg)
+                {
                     let occupancy = self.shadow_buffer.occupancy(&last_active_agg) as f64;
                     if occupancy < 30.0 {
                         return false;
                     }
-                    let expected_occupancy = self.shadow_buffer.expected_occupancy(&last_active_agg);
-                    let drop_prob = 1.0 - (expected_occupancy / occupancy) * (self.capacity_in_bytes / self.ingress_rate);
-                    let time_now_in_seconds = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64();
+                    let expected_occupancy =
+                        self.shadow_buffer.expected_occupancy(&last_active_agg);
+                    let drop_prob = 1.0
+                        - (expected_occupancy / occupancy)
+                            * (self.capacity_in_bytes / self.ingress_rate);
+                    let time_now_in_seconds = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs_f64();
                     debug!("Time {}, Src: {:?}, Occupancy: {}, Expected occupancy: {}, ingress rate: {}, egress rate: {}, drop prob: {}, queue length: {}, aggregate: {}", time_now_in_seconds, p.ip_hdr.source, occupancy, expected_occupancy, self.ingress_rate, self.egress_rate, drop_prob, self.inner.len(), last_active_agg);
                     self.shadow_buffer.get_rand_f64() < drop_prob
                 } else {
                     false
                 }
             }
-            None => {false}
+            None => false,
         }
     }
 }
@@ -496,6 +602,7 @@ impl Scheduler for HierarchicalApproximateFairDropping {
     }
 
     fn dbg(&self) {
+        self.shadow_buffer.dbg();
         debug!(?self.inner);
     }
 }
@@ -539,9 +646,7 @@ mod t {
             .unwrap();
 
         dbg!(wt.get_min_quantum().unwrap());
-        let hwfq = super::HierarchicalApproximateFairDropping::new(
-            0.1, wt, true, Some(1000000.0)
-        );
+        let hwfq = super::HierarchicalApproximateFairDropping::new(0.1, wt, true, Some(1000000.0));
 
         (
             hwfq,
@@ -564,7 +669,7 @@ mod t {
         let b_ingress_rate = 8;
         let d_ingress_rate = 5;
         let e_ingress_rate = 3;
-        
+
         for _ in 0..10000 {
             for _ in 0..b_ingress_rate {
                 hwfq.enq(Pkt {
@@ -620,7 +725,7 @@ mod t {
                             panic!("unknown ip");
                         }
                     }
-                    Ok(None) => {},
+                    Ok(None) => {}
                     Err(e) => panic!("error: {:?}", e),
                 }
             }
@@ -658,7 +763,7 @@ mod t {
         let e_ingress_rate = 10;
 
         let egress_rate = 9;
-        
+
         for _ in 0..100000 {
             for _ in 0..b_ingress_rate {
                 hwfq.enq(Pkt {
@@ -714,7 +819,7 @@ mod t {
                             panic!("unknown ip");
                         }
                     }
-                    Ok(None) => {},
+                    Ok(None) => {}
                     Err(e) => panic!("error: {:?}", e),
                 }
             }
@@ -722,11 +827,10 @@ mod t {
 
         dbg!(b_cnt, d_cnt, e_cnt);
         let expected_b_rate: f64 = b_ingress_rate as f64 / egress_rate as f64;
-        let b_actual = b_cnt  as f64 / (b_cnt + d_cnt + e_cnt) as f64;
-
+        let b_actual = b_cnt as f64 / (b_cnt + d_cnt + e_cnt) as f64;
 
         assert!(((b_actual - expected_b_rate) / expected_b_rate).abs() > -0.1);
-        
+
         // This ratio should be 2.0.
         let ratio_e_to_d = (e_cnt as f64) / (d_cnt as f64);
         assert!((ratio_e_to_d - 2.0).abs() < 0.15);
@@ -750,7 +854,7 @@ mod t {
         let b_ingress_rate = 80;
         let d_ingress_rate = 50;
         let e_ingress_rate = 30;
-        
+
         for _ in 0..10000 {
             for _ in 0..b_ingress_rate {
                 hwfq.enq(Pkt {
@@ -806,7 +910,7 @@ mod t {
                             panic!("unknown ip");
                         }
                     }
-                    Ok(None) => {},
+                    Ok(None) => {}
                     Err(e) => panic!("error: {:?}", e),
                 }
             }
@@ -828,5 +932,4 @@ mod t {
         assert!(d_cnt > 100);
         assert!(e_cnt > 100);
     }
-
 }

@@ -1,13 +1,12 @@
 use super::Scheduler;
+use crate::scheduler::common::WeightTree;
+use crate::scheduler::common::MAX_NUM_CHILDREN;
 use crate::Pkt;
 use color_eyre::eyre::{ensure, Report};
 #[cfg(feature = "hwfq-audit")]
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use tracing::debug;
-use crate::scheduler::common::WeightTree;
-use crate::scheduler::common::MAX_NUM_CHILDREN;
-use crate::scheduler::common::parse_ip;
 
 /// Implement a hierarchical deficit round-robin [`Scheduler`].
 ///
@@ -394,6 +393,7 @@ impl WeightTree {
 #[cfg(test)]
 mod t {
     use super::{Scheduler, WeightTree};
+    use crate::scheduler::common::parse_ip;
     use crate::Pkt;
     use tracing::info;
 
@@ -625,15 +625,15 @@ mod t {
     }
 
     #[test]
-    fn parse_ip() {
+    fn parse_ip_test() {
         init();
 
         let p = "42.1.2.15";
-        let m = super::parse_ip(&p).unwrap();
+        let m = parse_ip(p).unwrap();
         assert_eq!(m, u32::from_be_bytes([42, 1, 2, 15]));
 
         let p = "1.1.1.1";
-        let m = super::parse_ip(&p).unwrap();
+        let m = parse_ip(p).unwrap();
         assert_eq!(m, u32::from_be_bytes([1, 1, 1, 1]));
     }
 

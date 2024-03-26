@@ -1,5 +1,4 @@
 use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
-use tracing::debug;
 
 pub const MAX_NUM_CHILDREN: usize = 8;
 /// A tree of weights and IP addresses to match them against.
@@ -15,26 +14,25 @@ pub const MAX_NUM_CHILDREN: usize = 8;
 /// experiments with randomly assigned IPs.
 ///
 /// # Example
-// / ```rust
-// / let all_ips = [
-// /     u32::from_be_bytes([10, 0, 0, 0]),
-// /     u32::from_be_bytes([10, 1, 1, 1]),
-// /     u32::from_be_bytes([10, 1, 2, 1]),
-// / ];
-// / WeightTree::parent(1)
-// /     .add_child(vec![all_ips[0]], WeightTree::leaf(1))
-// /     .expect("This call cannot fail, since the sub-tree is depth 1")
-// /     .add_child(
-// /         all_ips[1..].to_vec(),
-// /         WeightTree::parent(2)
-// /             .add_child(vec![all_ips[1]], WeightTree::leaf(1))
-// /             .unwrap() // sub-tree of depth 1
-// /             .add_child(vec![all_ips[2]], WeightTree::leaf(2))
-// /             .unwrap(), // sub-tree of depth 1
-// /     )
-// /     .expect("We check here that the IP addresses passed to add_child match the full set in the
-// /     sub-tree.");
-// / ```
+/// ```rust
+/// let all_ips = [
+///     u32::from_be_bytes([10, 0, 0, 0]),
+///     u32::from_be_bytes([10, 1, 1, 1]),
+///     u32::from_be_bytes([10, 1, 2, 1]),
+/// ];
+/// WeightTree::parent(1)
+///     .add_child(vec![all_ips[0]], WeightTree::leaf(1))
+///     .expect("This call cannot fail, since the sub-tree is depth 1")
+///     .add_child(
+///         all_ips[1..].to_vec(),
+///         WeightTree::parent(2)
+///             .add_child(vec![all_ips[1]], WeightTree::leaf(1))
+///             .unwrap() // sub-tree of depth 1
+///             .add_child(vec![all_ips[2]], WeightTree::leaf(2))
+///             .unwrap(), // sub-tree of depth 1
+///     )
+///     .expect("Check here that the IP addrs passed to add_child match the full set in the sub-tree.");
+/// ```
 #[derive(Clone, Debug)]
 pub enum WeightTree {
     Leaf {
@@ -55,9 +53,7 @@ pub fn parse_ip(ip: &str) -> Result<u32, Report> {
         &[a, b, c, d] => (a.parse()?, b.parse()?, c.parse()?, d.parse()?),
         _ => unreachable!(),
     };
-    // debug!("Parsed IP: {}.{}.{}.{}", a, b, c, d);
     let ip = u32::from_be_bytes([a, b, c, d]);
-    // debug!("Parsed IP: {:x}", ip);
     Ok(ip)
 }
 
@@ -240,7 +236,7 @@ impl WeightTree {
 
     pub fn weight(&self) -> usize {
         match self {
-            WeightTree::NonLeaf { weight, .. } | WeightTree::Leaf { weight, ..} => *weight,
+            WeightTree::NonLeaf { weight, .. } | WeightTree::Leaf { weight, .. } => *weight,
         }
     }
 }
