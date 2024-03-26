@@ -4,12 +4,12 @@ use color_eyre::eyre::Report;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::f64::consts::E;
+use std::time::SystemTime;
 use tracing::debug;
 use tracing::error;
-use std::time::SystemTime;
-use std::f64::consts::E;
 
-const MAX_PACKETS : usize = 500;
+const MAX_PACKETS: usize = 500;
 
 const K: f64 = 0.1;
 
@@ -60,9 +60,15 @@ impl ShadowBuffer {
 
     pub fn total_weight(&self, ip_to_weight: &HashMap<u32, f64>) -> f64 {
         let mut total_weight = 0.0;
-        let src_ips_seen = self.inner.iter().map(|p| p.ip_hdr.source).collect::<HashSet<[u8; 4]>>();
+        let src_ips_seen = self
+            .inner
+            .iter()
+            .map(|p| p.ip_hdr.source)
+            .collect::<HashSet<[u8; 4]>>();
         for src_ip in src_ips_seen {
-            total_weight += ip_to_weight.get(&u32::from_be_bytes(src_ip)).unwrap_or(&1.0);
+            total_weight += ip_to_weight
+                .get(&u32::from_be_bytes(src_ip))
+                .unwrap_or(&1.0);
         }
         total_weight
     }
@@ -99,11 +105,7 @@ pub struct WeightedApproximateFairDropping {
 }
 
 impl WeightedApproximateFairDropping {
-    pub fn new (
-        packet_sample_prob: f64,
-        ip_to_weight: HashMap<u32, f64>,
-    ) -> Self {
-
+    pub fn new(packet_sample_prob: f64, ip_to_weight: HashMap<u32, f64>) -> Self {
         let shadow_buffer = ShadowBuffer::new(packet_sample_prob, MAX_PACKETS);
 
         Self {
@@ -120,11 +122,14 @@ impl WeightedApproximateFairDropping {
     fn should_drop(&mut self, p: &Pkt) -> bool {
         let occupancy = self.shadow_buffer.occupancy(p) as f64;
         let b = self.shadow_buffer.size() as f64;
-        let normalized_weight = self.ip_to_weight.get(&u32::from_be_bytes(p.ip_hdr.source)).unwrap() / self.shadow_buffer.total_weight(&self.ip_to_weight);
-        let drop_prob = 1.0 - ((normalized_weight * b) / occupancy) * (self.capacity / self.ingress_rate);
-        debug!("IP {:?}",
-            p.ip_hdr.source
-        );
+        let normalized_weight = self
+            .ip_to_weight
+            .get(&u32::from_be_bytes(p.ip_hdr.source))
+            .unwrap()
+            / self.shadow_buffer.total_weight(&self.ip_to_weight);
+        let drop_prob =
+            1.0 - ((normalized_weight * b) / occupancy) * (self.capacity / self.ingress_rate);
+        debug!("IP {:?}", p.ip_hdr.source);
         debug!("  occupancy: {}", occupancy);
         debug!("  b: {}", b);
         debug!("  normalized_weight: {}", normalized_weight);
@@ -137,12 +142,17 @@ impl WeightedApproximateFairDropping {
     fn update_ingress_rate(&mut self, p: &Pkt) {
         let time_since_rate_calc = self.last_update_time.elapsed().unwrap().as_secs_f64();
         let new_rate = p.len() as f64 / time_since_rate_calc;
-        self.ingress_rate = exponential_smooth(self.ingress_rate, new_rate, time_since_rate_calc, K);
+        self.ingress_rate =
+            exponential_smooth(self.ingress_rate, new_rate, time_since_rate_calc, K);
         self.last_update_time = SystemTime::now();
     }
 
     fn update_capacity(&mut self, p: &Pkt) {
-        let time_since_rate_calc = self.last_capacity_update_time.elapsed().unwrap().as_secs_f64();
+        let time_since_rate_calc = self
+            .last_capacity_update_time
+            .elapsed()
+            .unwrap()
+            .as_secs_f64();
         let new_rate = p.len() as f64 / time_since_rate_calc;
         self.capacity = exponential_smooth(self.capacity, new_rate, time_since_rate_calc, K);
         self.last_capacity_update_time = SystemTime::now();
@@ -150,7 +160,6 @@ impl WeightedApproximateFairDropping {
 }
 
 impl Scheduler for WeightedApproximateFairDropping {
-
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         let res = self.shadow_buffer.sample(&p);
         if let Err(e) = res {
@@ -176,7 +185,8 @@ impl Scheduler for WeightedApproximateFairDropping {
     }
 
     fn dbg(&self) {
-        debug!(?self.inner);
+        self.shadow_buffer.dbg();
+        debug!(?self.inner, "wafd");
     }
 }
 
@@ -208,10 +218,7 @@ mod t {
         let mut ip_to_weight = std::collections::HashMap::new();
         ip_to_weight.insert(u32::from_be_bytes([42, 0, 0, 0]), 1.0);
         ip_to_weight.insert(u32::from_be_bytes([42, 1, 1, 1]), 2.0);
-        let hwfq = super::WeightedApproximateFairDropping::new(
-            0.1,
-            ip_to_weight,
-        );
+        let hwfq = super::WeightedApproximateFairDropping::new(0.1, ip_to_weight);
 
         (
             hwfq,
@@ -270,7 +277,7 @@ mod t {
                             panic!("unknown ip");
                         }
                     }
-                    Ok(None) => {},
+                    Ok(None) => {}
                     Err(e) => panic!("error: {:?}", e),
                 }
             }
@@ -298,10 +305,7 @@ mod t {
         ip_to_weight.insert(u32::from_be_bytes([42, 1, 1, 1]), 3.0);
         ip_to_weight.insert(u32::from_be_bytes([42, 1, 2, 1]), 5.0);
 
-        let mut hwfq = super::WeightedApproximateFairDropping::new(
-            0.1,
-            ip_to_weight,
-        );
+        let mut hwfq = super::WeightedApproximateFairDropping::new(0.1, ip_to_weight);
 
         let dst_ip = [42, 2, 0, 0];
         let mut b_cnt = 0;
@@ -367,7 +371,7 @@ mod t {
                             panic!("unknown ip");
                         }
                     }
-                    Ok(None) => {},
+                    Ok(None) => {}
                     Err(e) => panic!("error: {:?}", e),
                 }
             }

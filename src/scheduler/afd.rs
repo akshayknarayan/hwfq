@@ -3,12 +3,12 @@ use crate::Pkt;
 use color_eyre::eyre::Report;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::f64::consts::E;
+use std::time::SystemTime;
 use tracing::debug;
 use tracing::error;
-use std::time::SystemTime;
-use std::f64::consts::E;
 
-const MAX_PACKETS : usize = 500;
+const MAX_PACKETS: usize = 500;
 
 const K: f64 = 0.1;
 
@@ -58,7 +58,11 @@ impl ShadowBuffer {
     }
 
     pub fn num_unique_flows(&self) -> usize {
-        let src_ips_seen = self.inner.iter().map(|p| p.ip_hdr.source).collect::<HashSet<[u8; 4]>>();
+        let src_ips_seen = self
+            .inner
+            .iter()
+            .map(|p| p.ip_hdr.source)
+            .collect::<HashSet<[u8; 4]>>();
         src_ips_seen.len()
     }
 
@@ -93,10 +97,7 @@ pub struct ApproximateFairDropping {
 }
 
 impl ApproximateFairDropping {
-    pub fn new (
-        packet_sample_prob: f64
-    ) -> Self {
-
+    pub fn new(packet_sample_prob: f64) -> Self {
         let shadow_buffer = ShadowBuffer::new(packet_sample_prob, MAX_PACKETS);
 
         Self {
@@ -127,12 +128,17 @@ impl ApproximateFairDropping {
     fn update_ingress_rate(&mut self, p: &Pkt) {
         let time_since_rate_calc = self.last_update_time.elapsed().unwrap().as_secs_f64();
         let new_rate = p.len() as f64 / time_since_rate_calc;
-        self.ingress_rate = exponential_smooth(self.ingress_rate, new_rate, time_since_rate_calc, K);
+        self.ingress_rate =
+            exponential_smooth(self.ingress_rate, new_rate, time_since_rate_calc, K);
         self.last_update_time = SystemTime::now();
     }
 
     fn update_capacity(&mut self, p: &Pkt) {
-        let time_since_rate_calc = self.last_capacity_update_time.elapsed().unwrap().as_secs_f64();
+        let time_since_rate_calc = self
+            .last_capacity_update_time
+            .elapsed()
+            .unwrap()
+            .as_secs_f64();
         let new_rate = p.len() as f64 / time_since_rate_calc;
         self.capacity = exponential_smooth(self.capacity, new_rate, time_since_rate_calc, K);
         self.last_capacity_update_time = SystemTime::now();
@@ -140,7 +146,6 @@ impl ApproximateFairDropping {
 }
 
 impl Scheduler for ApproximateFairDropping {
-
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         let res = self.shadow_buffer.sample(&p);
         if let Err(e) = res {
@@ -166,7 +171,8 @@ impl Scheduler for ApproximateFairDropping {
     }
 
     fn dbg(&self) {
-        debug!(?self.inner);
+        self.shadow_buffer.dbg();
+        debug!(?self.inner, "afd");
     }
 }
 
@@ -184,20 +190,13 @@ mod t {
         })
     }
 
-    fn make_test_tree() -> (
-        super::ApproximateFairDropping,
-        [u8; 4],
-        [u8; 4],
-        [u8; 4],
-    ) {
+    fn make_test_tree() -> (super::ApproximateFairDropping, [u8; 4], [u8; 4], [u8; 4]) {
         let all_ips = [
             u32::from_be_bytes([42, 0, 0, 0]),
             u32::from_be_bytes([42, 1, 1, 1]),
             u32::from_be_bytes([42, 1, 2, 1]),
         ];
-        let hwfq = super::ApproximateFairDropping::new(
-            0.1
-        );
+        let hwfq = super::ApproximateFairDropping::new(0.1);
 
         (
             hwfq,
@@ -263,7 +262,6 @@ mod t {
             })
             .unwrap();
 
-
             // Attempt to dequeue 3 packets.
             for _ in 0..3 {
                 match hwfq.deq() {
@@ -278,7 +276,7 @@ mod t {
                             panic!("unknown ip");
                         }
                     }
-                    Ok(None) => {},
+                    Ok(None) => {}
                     Err(e) => panic!("error: {:?}", e),
                 }
             }
@@ -298,7 +296,7 @@ mod t {
         assert!(d_cnt > 100);
     }
 
-#[test]
+    #[test]
     fn afd_single_pair() {
         init();
         let (mut hwfq, b_ip, c_ip, d_ip) = make_test_tree();
@@ -345,7 +343,7 @@ mod t {
                             panic!("unknown ip");
                         }
                     }
-                    Ok(None) => {},
+                    Ok(None) => {}
                     Err(e) => panic!("error: {:?}", e),
                 }
             }

@@ -49,5 +49,5 @@ fn fnv(src: [u8; 4], dst: [u8; 4], queues: u64) -> u8 {
         hash = u64::wrapping_mul(hash, FNV_64_PRIME);
     }
 
-    (hash % queues as u64) as u8
+    (hash % queues) as u8
 }
