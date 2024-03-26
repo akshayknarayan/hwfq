@@ -30,14 +30,17 @@ pub use drr::Drr;
 mod hdwrr;
 pub use hdwrr::HierarchicalDeficitWeightedRoundRobin;
 
+#[cfg(feature = "afd")]
 mod afd;
-pub use afd::ApproximateFairDropping;
-
-mod wafd;
-pub use wafd::WeightedApproximateFairDropping;
-
+#[cfg(feature = "afd")]
 mod hafd;
-pub use hafd::HierarchicalApproximateFairDropping;
+#[cfg(feature = "afd")]
+mod wafd;
+#[cfg(feature = "afd")]
+pub use {
+    afd::ApproximateFairDropping, hafd::HierarchicalApproximateFairDropping,
+    wafd::WeightedApproximateFairDropping,
+};
 
 fn fnv(src: [u8; 4], dst: [u8; 4], queues: u64) -> u8 {
     const FNV1_64_INIT: u64 = 0xcbf29ce484222325u64;
