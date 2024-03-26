@@ -8,19 +8,19 @@ bin = ["structopt", "tracing-subscriber"]
 hwfq-audit = []
 
 [dependencies]
-tun-tap = "0.1"
+tun-tap = { version = "0.1", default-features=false, features = [] }
 etherparse = "0.10"
 socket2 = { version = "0.5.3", features = ["all"] }
 pnet = "0.29"
 libc = "0.2"
-flume = "0.10"
+flume = "0.11"
 quanta = "0.9"
 yaml-rust = "0.4"
 tracing = "0.1"
 color-eyre = "0.6"
+rand = "0.8"
 structopt = { version = "0.3", optional = true }
 tracing-subscriber  = { version = "0.3", optional = true }
-rand = "0.8"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
