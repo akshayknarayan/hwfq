@@ -1,37 +1,40 @@
+use clap::Parser;
 use color_eyre::{
     eyre::{eyre, Report},
     Help,
 };
-use hwfq::scheduler::{Drr, Fifo, HierarchicalDeficitWeightedRoundRobin, HierarchicalApproximateFairDropping, ApproximateFairDropping};
 use hwfq::scheduler::common::WeightTree;
+use hwfq::scheduler::{
+    ApproximateFairDropping, Drr, Fifo, HierarchicalApproximateFairDropping,
+    HierarchicalDeficitWeightedRoundRobin,
+};
 use hwfq::Datapath;
-use structopt::StructOpt;
 
-#[derive(StructOpt, Debug)]
-#[structopt(name = "hwfq")]
+#[derive(Parser, Debug)]
+#[command(name = "hwfq")]
 struct Opt {
-    #[structopt(short, long)]
+    #[arg(short, long)]
     fwd_address: String,
 
-    #[structopt(short, long, default_value = "hwfq-%d")]
+    #[arg(short, long, default_value = "hwfq-%d")]
     listen_interface: String,
 
-    #[structopt(short, long)]
+    #[arg(short, long)]
     rate_bytes_per_sec: Option<usize>,
 
-    #[structopt(short, long)]
+    #[arg(short, long)]
     queue_size_bytes: usize,
 
-    #[structopt(long)]
+    #[arg(long)]
     receiver_weights: bool,
 
-    #[structopt(short, long)]
+    #[arg(short, long)]
     scheduler: String,
 
-    #[structopt(short, long, required_if("scheduler", "hwfq"))]
+    #[arg(short, long, required_if_eq("scheduler", "hwfq"))]
     weights_cfg: Option<std::path::PathBuf>,
 
-    #[structopt(long, default_value = "0.1")]
+    #[arg(long, default_value = "0.1")]
     sample_prob: f64,
 }
 
@@ -39,7 +42,7 @@ pub fn main() -> Result<(), Report> {
     color_eyre::install()?;
     tracing_subscriber::fmt::init();
 
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
     match opt.scheduler.as_str() {
         "none" => {
@@ -93,10 +96,7 @@ pub fn main() -> Result<(), Report> {
             s.run().unwrap();
         }
         "afd" => {
-            let cfg = opt.weights_cfg.unwrap();
-            let afd = ApproximateFairDropping::new(
-                opt.sample_prob,
-            );
+            let afd = ApproximateFairDropping::new(opt.sample_prob);
             let s = Datapath::new(
                 &opt.listen_interface,
                 &opt.fwd_address,
@@ -117,9 +117,9 @@ pub fn main() -> Result<(), Report> {
                 !opt.receiver_weights,
                 Some(
                     opt.rate_bytes_per_sec
-                        .ok_or(eyre!("Pacing rate is required to use scheduler"))? as f64,
+                        .ok_or(eyre!("Pacing rate is required to use scheduler"))?
+                        as f64,
                 ),
-
             );
             let s = Datapath::new(
                 &opt.listen_interface,
