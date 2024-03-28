@@ -30,6 +30,8 @@ pub use drr::Drr;
 mod hdwrr;
 pub use hdwrr::HierarchicalDeficitWeightedRoundRobin;
 
+pub mod htb;
+
 #[cfg(feature = "afd")]
 mod afd;
 #[cfg(feature = "afd")]

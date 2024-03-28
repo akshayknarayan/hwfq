@@ -4,7 +4,7 @@ use socket2::{Domain, Socket, Type};
 use std::net::Ipv4Addr;
 use std::os::unix::io::AsRawFd;
 
-/// Raw IP socekt bound to an interface (send only)
+/// Raw IP socket bound to an interface (send only)
 pub struct IpIfaceSocket {
     inner: Socket,
     bound_iface: String,
@@ -53,11 +53,12 @@ impl IpIfaceSocket {
             }
             Some(TransportHeader::Tcp(tcp_hdr)) => {
                 // calculate new tcp checksum
-                let tcp_csum = tcp_hdr.calc_checksum_ipv4(&ip_hdr, p.payload)?;
+                let tcp_csum = tcp_hdr.calc_checksum_ipv4(&ip_hdr, p.payload.slice())?;
                 let tcp_hdr_buf =
                     &mut buf[transp_hdr_start..transp_hdr_start + tcp_hdr.header_len() as usize];
                 tcp_hdr_buf[16..18].copy_from_slice(&tcp_csum.to_be_bytes());
             }
+            Some(_) => unreachable!(),
             None => (),
         }
 

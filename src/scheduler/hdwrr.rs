@@ -109,8 +109,8 @@ enum FlowTree {
 
 impl std::fmt::Debug for FlowTree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        match self {
-            &FlowTree::Leaf {
+        match *self {
+            FlowTree::Leaf {
                 quanta, ref queue, ..
             } => f
                 .debug_struct("FlowTree::Leaf")
@@ -118,7 +118,7 @@ impl std::fmt::Debug for FlowTree {
                 .field("queue_len", &queue.len())
                 .finish_non_exhaustive(),
 
-            &FlowTree::NonLeaf {
+            FlowTree::NonLeaf {
                 quanta,
                 ref classify,
                 ref children,
@@ -152,8 +152,8 @@ impl FlowTree {
     }
 
     fn enqueue<const USE_SRC_IP: bool>(&mut self, p: Pkt) {
-        match self {
-            &mut FlowTree::Leaf {
+        match *self {
+            FlowTree::Leaf {
                 ref mut queue,
                 ref mut curr_qlen,
                 ..
@@ -161,7 +161,7 @@ impl FlowTree {
                 *curr_qlen += p.buf.len();
                 queue.push_back(p);
             }
-            &mut FlowTree::NonLeaf {
+            FlowTree::NonLeaf {
                 ref mut children,
                 ref mut classify,
                 ref mut curr_qlen,
@@ -200,7 +200,6 @@ impl FlowTree {
                 }
 
                 debug!(ip_hdr = ?p.ip_hdr, "Packet did not match any classifications");
-                return;
             }
         }
     }
@@ -223,31 +222,29 @@ impl FlowTree {
     }
 
     fn dequeue(&mut self) -> Option<Pkt> {
-        match self {
-            &mut FlowTree::Leaf {
+        match *self {
+            FlowTree::Leaf {
                 ref mut deficit,
                 ref mut curr_qlen,
                 ref mut queue,
                 ..
             } => {
-                if !queue.is_empty() {
-                    if *deficit >= queue.front().unwrap().buf.len() {
-                        let p = queue.pop_front().unwrap();
-                        if queue.is_empty() {
-                            *deficit = 0;
-                            *curr_qlen = 0;
-                        } else {
-                            *deficit -= p.buf.len();
-                            *curr_qlen -= p.buf.len();
-                        }
-
-                        return Some(p);
+                if !queue.is_empty() && *deficit >= queue.front().unwrap().buf.len() {
+                    let p = queue.pop_front().unwrap();
+                    if queue.is_empty() {
+                        *deficit = 0;
+                        *curr_qlen = 0;
+                    } else {
+                        *deficit -= p.buf.len();
+                        *curr_qlen -= p.buf.len();
                     }
+
+                    return Some(p);
                 }
 
                 None
             }
-            &mut FlowTree::NonLeaf {
+            FlowTree::NonLeaf {
                 ref mut deficit,
                 ref mut curr_qlen,
                 ref mut curr_child,
@@ -503,33 +500,42 @@ mod t {
                 ip_hdr: etherparse::Ipv4Header::new(
                     100,
                     64,
-                    etherparse::IpNumber::Tcp,
+                    etherparse::IpNumber::TCP,
                     b_ip,
                     dst_ip,
-                ),
-                buf: vec![0u8; 100],
+                )
+                .unwrap(),
+                dport: 0,
+                buf: vec![],
+                fake_len: 100,
             })
             .unwrap();
             hwfq.enq(Pkt {
                 ip_hdr: etherparse::Ipv4Header::new(
                     100,
                     64,
-                    etherparse::IpNumber::Tcp,
+                    etherparse::IpNumber::TCP,
                     d_ip,
                     dst_ip,
-                ),
-                buf: vec![0u8; 100],
+                )
+                .unwrap(),
+                dport: 0,
+                buf: vec![],
+                fake_len: 100,
             })
             .unwrap();
             hwfq.enq(Pkt {
                 ip_hdr: etherparse::Ipv4Header::new(
                     100,
                     64,
-                    etherparse::IpNumber::Tcp,
+                    etherparse::IpNumber::TCP,
                     e_ip,
                     dst_ip,
-                ),
-                buf: vec![0u8; 100],
+                )
+                .unwrap(),
+                dport: 0,
+                buf: vec![],
+                fake_len: 100,
             })
             .unwrap();
         }
@@ -577,22 +583,28 @@ mod t {
                 ip_hdr: etherparse::Ipv4Header::new(
                     100,
                     64,
-                    etherparse::IpNumber::Tcp,
+                    etherparse::IpNumber::TCP,
                     d_ip,
                     dst_ip,
-                ),
-                buf: vec![0u8; 100],
+                )
+                .unwrap(),
+                dport: 0,
+                buf: vec![],
+                fake_len: 100,
             })
             .unwrap();
             hwfq.enq(Pkt {
                 ip_hdr: etherparse::Ipv4Header::new(
                     100,
                     64,
-                    etherparse::IpNumber::Tcp,
+                    etherparse::IpNumber::TCP,
                     e_ip,
                     dst_ip,
-                ),
-                buf: vec![0u8; 100],
+                )
+                .unwrap(),
+                dport: 0,
+                buf: vec![],
+                fake_len: 100,
             })
             .unwrap();
         }
@@ -736,33 +748,42 @@ root:
                 ip_hdr: etherparse::Ipv4Header::new(
                     100,
                     64,
-                    etherparse::IpNumber::Tcp,
+                    etherparse::IpNumber::TCP,
                     src_ip,
                     b_ip,
-                ),
-                buf: vec![0u8; 100],
+                )
+                .unwrap(),
+                dport: 0,
+                buf: vec![],
+                fake_len: 100,
             })
             .unwrap();
             hwfq.enq(Pkt {
                 ip_hdr: etherparse::Ipv4Header::new(
                     100,
                     64,
-                    etherparse::IpNumber::Tcp,
+                    etherparse::IpNumber::TCP,
                     src_ip,
                     d_ip,
-                ),
-                buf: vec![0u8; 100],
+                )
+                .unwrap(),
+                dport: 0,
+                buf: vec![],
+                fake_len: 100,
             })
             .unwrap();
             hwfq.enq(Pkt {
                 ip_hdr: etherparse::Ipv4Header::new(
                     100,
                     64,
-                    etherparse::IpNumber::Tcp,
+                    etherparse::IpNumber::TCP,
                     src_ip,
                     e_ip,
-                ),
-                buf: vec![0u8; 100],
+                )
+                .unwrap(),
+                dport: 0,
+                buf: vec![],
+                fake_len: 100,
             })
             .unwrap();
         }

@@ -1,23 +1,23 @@
+use clap::Parser;
 use color_eyre::eyre::{ensure, Report, WrapErr};
 use std::os::unix::net::UnixDatagram;
-use structopt::StructOpt;
 use tracing::debug;
 use tun_tap::Iface;
 
-#[derive(StructOpt, Debug)]
-#[structopt(name = "uds_out")]
+#[derive(Parser, Debug)]
+#[command(name = "uds_out")]
 struct Opt {
-    #[structopt(short, long, default_value = "hwfq-%d")]
+    #[arg(short, long, default_value = "hwfq-%d")]
     listen_interface: String,
 
-    #[structopt(short, long)]
+    #[arg(short, long)]
     packet_source: std::path::PathBuf,
 }
 
 pub fn main() -> Result<(), Report> {
     color_eyre::install()?;
     tracing_subscriber::fmt::init();
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
     let iface = Iface::new(&opt.listen_interface, tun_tap::Mode::Tap)
         .wrap_err("could not create TAP interface")?;
@@ -27,7 +27,7 @@ pub fn main() -> Result<(), Report> {
     fn msg(sk: &UnixDatagram, buf: &mut [u8], iface: &Iface) -> Result<(), Report> {
         let rlen = sk.recv(buf).wrap_err("uds recv")?;
         if let Ok(p) = etherparse::PacketHeaders::from_ethernet_slice(&buf[..rlen]) {
-            tracing::trace!(?p.ip, "forwarding packet");
+            tracing::trace!(?p.net, "forwarding packet");
         }
 
         let msg = &mut buf[..rlen];

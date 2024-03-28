@@ -231,7 +231,7 @@ mod t {
     #[test]
     fn wafd_simple() {
         init();
-        let (mut hwfq, b_ip, c_ip, d_ip) = make_test_tree();
+        let (mut hwfq, b_ip, c_ip, _d_ip) = make_test_tree();
         let dst_ip = [42, 2, 0, 0];
         let mut b_cnt = 0;
         let mut c_cnt = 0;
@@ -243,11 +243,14 @@ mod t {
                     ip_hdr: etherparse::Ipv4Header::new(
                         100,
                         64,
-                        etherparse::IpNumber::Tcp,
+                        etherparse::IpNumber::TCP,
                         b_ip,
                         dst_ip,
-                    ),
-                    buf: vec![0u8; 100],
+                    )
+                    .unwrap(),
+                    dport: 0,
+                    buf: vec![0u8; 0],
+                    fake_len: 100,
                 })
                 .unwrap();
             }
@@ -256,11 +259,14 @@ mod t {
                     ip_hdr: etherparse::Ipv4Header::new(
                         100,
                         64,
-                        etherparse::IpNumber::Tcp,
+                        etherparse::IpNumber::TCP,
                         c_ip,
                         dst_ip,
-                    ),
-                    buf: vec![0u8; 100],
+                    )
+                    .unwrap(),
+                    dport: 0,
+                    buf: vec![0u8; 0],
+                    fake_len: 100,
                 })
                 .unwrap();
             }
@@ -322,11 +328,14 @@ mod t {
                     ip_hdr: etherparse::Ipv4Header::new(
                         100,
                         64,
-                        etherparse::IpNumber::Tcp,
+                        etherparse::IpNumber::TCP,
                         b_ip,
                         dst_ip,
-                    ),
-                    buf: vec![0u8; 100],
+                    )
+                    .unwrap(),
+                    dport: 0,
+                    buf: vec![0u8; 0],
+                    fake_len: 100,
                 })
                 .unwrap();
             }
@@ -335,11 +344,14 @@ mod t {
                     ip_hdr: etherparse::Ipv4Header::new(
                         100,
                         64,
-                        etherparse::IpNumber::Tcp,
+                        etherparse::IpNumber::TCP,
                         c_ip,
                         dst_ip,
-                    ),
-                    buf: vec![0u8; 100],
+                    )
+                    .unwrap(),
+                    dport: 0,
+                    buf: vec![0u8; 0],
+                    fake_len: 100,
                 })
                 .unwrap();
             }
@@ -348,11 +360,14 @@ mod t {
                     ip_hdr: etherparse::Ipv4Header::new(
                         100,
                         64,
-                        etherparse::IpNumber::Tcp,
+                        etherparse::IpNumber::TCP,
                         d_ip,
                         dst_ip,
-                    ),
-                    buf: vec![0u8; 100],
+                    )
+                    .unwrap(),
+                    dport: 0,
+                    buf: vec![0u8; 0],
+                    fake_len: 100,
                 })
                 .unwrap();
             }
