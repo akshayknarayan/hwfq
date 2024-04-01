@@ -16,6 +16,7 @@
 
 use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
 use etherparse::{TcpHeader, TransportHeader, UdpHeader};
+use flume::RecvError;
 use std::process::Command;
 use std::time::SystemTime;
 use tracing::{debug, info, trace};
@@ -236,72 +237,93 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
         // doesn't know that, and makes a fuss about queue being mutably borrowed twice.
         // So we are going to use RefCell.
         let queue = std::cell::RefCell::new(self.queue);
-        loop {
-            flume::select::Selector::new()
-                .recv(&r, |p| {
-                    let mut q = queue.try_borrow_mut().unwrap();
-                    match q.enq(p.unwrap()) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        debug!(err=%format!("{:#?}", e), "enq error");
-                    }
-                }})
-                .recv(&ticker_r, |bytes| {
-                    let mut q = queue.try_borrow_mut().unwrap();
-                    accum_tokens += bytes.unwrap() as isize;
-                    debug!("Accumtokenupdate Time: {:?}, accum_tokens: {}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), accum_tokens);
-                    while accum_tokens > 0 {
-                        match q.deq() {
-                            Ok(None) => {
-                                if let Some(Rate { bytes, epoch_start }) = &achieved_tx_rate {
-                                    let el = clk.delta(*epoch_start, clk.raw());
-                                    if el > std::time::Duration::from_millis(10) {
-                                        let epoch_rate_bytes_per_sec = *bytes as f64 / el.as_secs_f64();
-                                        let rate_mbps = epoch_rate_bytes_per_sec * 8. / 1e6;
-                                        debug!(?accum_tokens, ?rate_mbps, ?el, "queue_empty");
-                                    }
-                                }
 
-                                // we're not active right now, so we get rid of any token backlog
-                                // to avoid bursting. Once packets come back, we will resume
-                                // building up a backlog.
-                                achieved_tx_rate = None;
-                                accum_tokens = 0;
-                            }
-                            Ok(Some(p)) => {
-                                match &mut achieved_tx_rate {
-                                    None => {
-                                        achieved_tx_rate = Some(Rate {
-                                            epoch_start: clk.raw(),
-                                            bytes: p.buf.len(),
-                                        });
-                                    }
-                                    Some(Rate { bytes, epoch_start }) => {
-                                        *bytes += p.buf.len();
+        let handle_incoming = |p: Result<Pkt, RecvError>| {
+            let mut q = queue.try_borrow_mut().unwrap();
+            match q.enq(p.unwrap()) {
+                Ok(_) => {}
+                Err(e) => {
+                    debug!(err=%format!("{:#?}", e), "enq error");
+                }
+            }
+        };
+
+        let mut need_dequeue = false;
+
+        loop {
+            if !need_dequeue {
+                let p = r.recv();
+                handle_incoming(p);
+                need_dequeue = true;
+            } else {
+                flume::select::Selector::new()
+                    .recv(&r, handle_incoming)
+                    .recv(&ticker_r, |bytes| {
+                        let mut q = queue.try_borrow_mut().unwrap();
+                        accum_tokens += bytes.unwrap() as isize;
+                        debug!(
+                            "Accumtokenupdate Time: {:?}, accum_tokens: {}",
+                            SystemTime::now()
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs_f64(),
+                            accum_tokens
+                        );
+                        while accum_tokens > 0 {
+                            match q.deq() {
+                                Ok(None) => {
+                                    if let Some(Rate { bytes, epoch_start }) = &achieved_tx_rate {
                                         let el = clk.delta(*epoch_start, clk.raw());
-                                        if el > std::time::Duration::from_millis(100) {
+                                        if el > std::time::Duration::from_millis(10) {
                                             let epoch_rate_bytes_per_sec = *bytes as f64 / el.as_secs_f64();
-                                            let achieved_rate_mbps = epoch_rate_bytes_per_sec * 8. / 1e6;
-                                            info!(?achieved_rate_mbps, ?el, "pacing update");
-                                            achieved_tx_rate = None;
-                                            q.dbg();
+                                            let rate_mbps = epoch_rate_bytes_per_sec * 8. / 1e6;
+                                            debug!(?accum_tokens, ?rate_mbps, ?el, "queue_empty");
                                         }
                                     }
-                                }
 
-                                accum_tokens -= p.buf.len() as isize;
-                                let Pkt { ip_hdr, buf, .. } = p;
-                                debug!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "forwarding packet");
-                                if let Err(e) = self.fwd.send(&buf) {
-                                    debug!(?e, "fwd error");
+                                    // we're not active right now, so we get rid of any token backlog
+                                    // to avoid bursting. Once packets come back, we will resume
+                                    // building up a backlog.
+                                    achieved_tx_rate = None;
+                                    accum_tokens = 0;
+                                    need_dequeue = false;
                                 }
-                            }
-                            Err(e) => {
-                                debug!(?e, "deq error");
-                            }
-                        };
-                    }
-                }).wait();
+                                Ok(Some(p)) => {
+                                    match &mut achieved_tx_rate {
+                                        None => {
+                                            achieved_tx_rate = Some(Rate {
+                                                epoch_start: clk.raw(),
+                                                bytes: p.buf.len(),
+                                            });
+                                        }
+                                        Some(Rate { bytes, epoch_start }) => {
+                                            *bytes += p.buf.len();
+                                            let el = clk.delta(*epoch_start, clk.raw());
+                                            if el > std::time::Duration::from_millis(100) {
+                                                let epoch_rate_bytes_per_sec = *bytes as f64 / el.as_secs_f64();
+                                                let achieved_rate_mbps = epoch_rate_bytes_per_sec * 8. / 1e6;
+                                                info!(?achieved_rate_mbps, ?el, "pacing update");
+                                                achieved_tx_rate = None;
+                                                q.dbg();
+                                            }
+                                        }
+                                    }
+
+                                    accum_tokens -= p.buf.len() as isize;
+                                    let Pkt { ip_hdr, buf, .. } = p;
+                                    debug!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "forwarding packet");
+                                    if let Err(e) = self.fwd.send(&buf) {
+                                        debug!(?e, "fwd error");
+                                    }
+                                }
+                                Err(e) => {
+                                    debug!(?e, "deq error");
+                                }
+                            };
+                        }
+                })
+                .wait();
+            }
         }
     }
 }
