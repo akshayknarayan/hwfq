@@ -287,16 +287,7 @@ impl Scheduler for ClassedTokenBucket {
         // first let's try to use classes' accumulated tokens.
         let stop_idx = start_idx;
         loop {
-            println!(
-                "cls {:?} / {:?} quanta {:?} qlen {:?}",
-                start_idx,
-                stop_idx,
-                self.classes[start_idx].common.accum_bytes,
-                self.classes[start_idx].queue.len()
-            );
-
             if let Some(p) = self.classes[start_idx].try_deq() {
-                println!("sending from {:?}", start_idx);
                 return Ok(Some(p));
             }
 
@@ -312,7 +303,6 @@ impl Scheduler for ClassedTokenBucket {
         let stop_idx = self.curr_idx;
         loop {
             if let Some(p) = self.classes[self.curr_idx].deq() {
-                println!("bonus sending from {:?}", self.curr_idx);
                 self.curr_idx = (self.curr_idx + 1) % self.classes.len();
                 return Ok(Some(p));
             }
