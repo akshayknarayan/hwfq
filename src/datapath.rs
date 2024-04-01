@@ -47,8 +47,8 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
         tx_rate_bytes_per_sec: Option<usize>,
         sch: S,
     ) -> Result<Self, Report> {
-        let iface = Iface::new(listen_iface, tun_tap::Mode::Tap)
-            .wrap_err("could not create TAP interface")?;
+        let iface = Iface::new(listen_iface, tun_tap::Mode::Tun)
+            .wrap_err("could not create TUN interface")?;
         let this = Self {
             iface,
             out_port: OutputPort::new(fwd_iface, tx_rate_bytes_per_sec, sch)?,
@@ -79,7 +79,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
             }
 
             let recv_buf = &buf[4..len];
-            let hdr = match etherparse::PacketHeaders::from_ethernet_slice(recv_buf) {
+            let hdr = match etherparse::PacketHeaders::from_ip_slice(recv_buf) {
                 Ok(h) => h,
                 Err(e) => {
                     trace!(err = %format!("{:#?}", e), "could not parse packet");
@@ -94,8 +94,8 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
             let ip_hdr = match get_ipv4_hdr(&hdr) {
                 Ok(ip_hdr) => ip_hdr,
                 Err(e) => {
-                    trace!(err = %format!("{:#?}", e), "could not parse packet as ipv4");
-                    if let Err(err) = bypass.send(&buf) {
+                    trace!(err = %format!("{:#?}", e), pkt = ?hdr, "could not parse packet as ipv4");
+                    if let Err(err) = bypass.send(recv_buf) {
                         debug!(?err, "error sending non-ipv4 packet via bypass");
                     }
 
@@ -106,9 +106,9 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
             let dport = match get_dport(&hdr) {
                 Ok(p) => p,
                 Err(e) => {
-                    trace!(err = %format!("{:#?}", e), "could not parse packet as ipv4");
-                    if let Err(err) = bypass.send(&buf) {
-                        debug!(?err, "error sending non-ipv4 packet via bypass");
+                    trace!(err = %format!("{:#?}", e), pkt = ?hdr, "could not parse packet as UDP or TCP");
+                    if let Err(err) = bypass.send(recv_buf) {
+                        debug!(?err, "error sending non-udp/tcp packet via bypass");
                     }
 
                     continue;
