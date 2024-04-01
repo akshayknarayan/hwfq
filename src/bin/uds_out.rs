@@ -19,15 +19,16 @@ pub fn main() -> Result<(), Report> {
     tracing_subscriber::fmt::init();
     let opt = Opt::parse();
 
-    let iface = Iface::new(&opt.listen_interface, tun_tap::Mode::Tap)
-        .wrap_err("could not create TAP interface")?;
+    let iface = Iface::new(&opt.listen_interface, tun_tap::Mode::Tun)
+        .wrap_err("could not create TUN interface")?;
     config_ip(iface.name())?;
     let sk = UnixDatagram::bind(&opt.packet_source).unwrap();
 
     fn msg(sk: &UnixDatagram, buf: &mut [u8], iface: &Iface) -> Result<(), Report> {
         let rlen = sk.recv(buf).wrap_err("uds recv")?;
-        if let Ok(p) = etherparse::PacketHeaders::from_ethernet_slice(&buf[..rlen]) {
-            tracing::trace!(?p.net, "forwarding packet");
+        match etherparse::PacketHeaders::from_ip_slice(&buf[..rlen]) {
+            Ok(p) => tracing::trace!(?p.net, "forwarding packet"),
+            Err(err) => tracing::trace!(?err, "forwarding parse failed"),
         }
 
         let msg = &mut buf[..rlen];
