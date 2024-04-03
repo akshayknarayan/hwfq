@@ -14,8 +14,7 @@
 //! and handle packets; if it does not exist, [`Datapath::new`] will error, but if it black-holes
 //! packets [`Datapath`] will not complain.
 
-use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
-use etherparse::{TcpHeader, TransportHeader, UdpHeader};
+use color_eyre::eyre::{ensure, Report, WrapErr};
 use flume::RecvError;
 use std::process::Command;
 use std::time::SystemTime;
@@ -23,7 +22,7 @@ use tracing::{debug, info, trace};
 use tun_tap::Iface;
 
 use crate::scheduler::Scheduler;
-use crate::Pkt;
+use crate::{get_dport, get_ipv4_hdr, Pkt};
 
 /// Manage pacing, scheduling (via the parameter), and forwarding packets to a Unix pipe.
 ///
@@ -324,33 +323,6 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
                 })
                 .wait();
             }
-        }
-    }
-}
-
-fn get_ipv4_hdr(p: &etherparse::PacketHeaders<'_>) -> Result<etherparse::Ipv4Header, Report> {
-    match p.net.as_ref().ok_or_else(|| eyre!("no ip header"))? {
-        etherparse::NetHeaders::Ipv4(ipv4, _) => Ok(ipv4.clone()),
-        x => {
-            bail!("got {:?}", x);
-        }
-    }
-}
-
-fn get_dport(p: &etherparse::PacketHeaders<'_>) -> Result<u16, Report> {
-    match p
-        .transport
-        .as_ref()
-        .ok_or_else(|| eyre!("no transport header"))?
-    {
-        TransportHeader::Udp(UdpHeader {
-            destination_port, ..
-        })
-        | TransportHeader::Tcp(TcpHeader {
-            destination_port, ..
-        }) => Ok(*destination_port),
-        _ => {
-            bail!("need UDP or TCP packet to get destination port");
         }
     }
 }
