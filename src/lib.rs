@@ -37,13 +37,88 @@ impl Pkt {
         self.dport
     }
 
+    pub fn buf(&self) -> &[u8] {
+        &self.buf
+    }
+    pub fn buf_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.buf
+    }
+
     #[cfg(not(test))]
     pub fn len(&self) -> usize {
         self.buf.len()
     }
 
+    #[cfg(not(test))]
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.fake_len
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.fake_len == 0
+    }
+}
+
+use color_eyre::eyre::{bail, eyre, Report};
+use etherparse::{TcpHeader, TransportHeader, UdpHeader};
+
+fn get_ipv4_hdr(p: &etherparse::PacketHeaders<'_>) -> Result<etherparse::Ipv4Header, Report> {
+    match p.net.as_ref().ok_or_else(|| eyre!("no ip header"))? {
+        etherparse::NetHeaders::Ipv4(ipv4, _) => Ok(ipv4.clone()),
+        x => {
+            bail!("got {:?}", x);
+        }
+    }
+}
+
+fn get_dport(p: &etherparse::PacketHeaders<'_>) -> Result<u16, Report> {
+    match p
+        .transport
+        .as_ref()
+        .ok_or_else(|| eyre!("no transport header"))?
+    {
+        TransportHeader::Udp(UdpHeader {
+            destination_port, ..
+        })
+        | TransportHeader::Tcp(TcpHeader {
+            destination_port, ..
+        }) => Ok(*destination_port),
+        _ => {
+            bail!("need UDP or TCP packet to get destination port");
+        }
+    }
+}
+
+impl TryFrom<Vec<u8>> for Pkt {
+    type Error = (Vec<u8>, Report);
+
+    fn try_from(v: Vec<u8>) -> Result<Self, Self::Error> {
+        let parse_result = etherparse::PacketHeaders::from_ethernet_slice(&v)
+            .map_err(Into::into)
+            .and_then(|hdr| {
+                let ip_hdr = get_ipv4_hdr(&hdr)?;
+                let dport = get_dport(&hdr)?;
+                Ok::<_, Report>((ip_hdr, dport))
+            });
+        match parse_result {
+            Ok((ip_hdr, dport)) => {
+                #[cfg(test)]
+                let fake_len = v.len();
+                Ok(Pkt {
+                    ip_hdr,
+                    dport,
+                    buf: v,
+                    #[cfg(test)]
+                    fake_len,
+                })
+            }
+            Err(e) => Err((v, e)),
+        }
     }
 }
