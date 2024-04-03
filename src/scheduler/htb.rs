@@ -178,8 +178,16 @@ impl Class {
         }
     }
 
+    fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
     fn tot_len_bytes(&self) -> usize {
         self.queue.iter().map(|p| p.len()).sum()
+    }
+
+    fn tot_len_pkts(&self) -> usize {
+        self.queue.len()
     }
 
     fn accumulate(&mut self) {
@@ -243,6 +251,22 @@ impl ClassedTokenBucket {
             dport_to_idx,
             curr_idx: 0,
         })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.classes.iter().all(Class::is_empty)
+    }
+
+    pub fn tot_len_bytes(&self) -> usize {
+        self.classes.iter().map(Class::tot_len_bytes).sum()
+    }
+
+    pub fn tot_len_pkts(&self) -> usize {
+        self.classes.iter().map(Class::tot_len_pkts).sum()
+    }
+
+    pub fn set_max_len_bytes(&mut self, bytes: usize) {
+        self.max_len_bytes = bytes;
     }
 }
 
@@ -314,6 +338,101 @@ impl Scheduler for ClassedTokenBucket {
         }
 
         Ok(None)
+    }
+}
+
+#[cfg(feature = "htb-argparse")]
+pub mod parse_args {
+    use std::str::FromStr;
+
+    use clap::Parser;
+    use color_eyre::eyre::{eyre, Report};
+
+    use super::{Class, ClassedTokenBucket, TokenBucket};
+
+    #[derive(Parser, Debug)]
+    #[command(name = "hwfq")]
+    pub struct Opt {
+        #[arg(short, long)]
+        pub queue_size_bytes: usize,
+
+        #[arg(long)]
+        pub class: Vec<ClassOpt>,
+
+        #[arg(long)]
+        pub default_class: Option<ClassOpt>,
+    }
+
+    impl FromStr for ClassedTokenBucket {
+        type Err = Report;
+
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            let sp = s.split_whitespace();
+            let dummy = std::iter::once("tmp");
+            let opt = Opt::try_parse_from(dummy.chain(sp))?;
+            opt.try_into()
+        }
+    }
+
+    impl TryFrom<Opt> for ClassedTokenBucket {
+        type Error = Report;
+        fn try_from(o: Opt) -> Result<Self, Self::Error> {
+            ClassedTokenBucket::new(
+                o.queue_size_bytes,
+                o.class.into_iter().map(Into::into),
+                o.default_class.map(Into::into),
+            )
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct ClassOpt {
+        dport: u16,
+        rate: usize,
+    }
+
+    impl FromStr for ClassOpt {
+        type Err = Report;
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            let mut sp = s.split('=');
+            let dport = sp
+                .next()
+                .ok_or_else(|| eyre!("dport=rate format for class"))?
+                .parse()?;
+            let rate = sp
+                .next()
+                .ok_or_else(|| eyre!("dport=rate format for class"))?
+                .parse()?;
+            Ok(ClassOpt { dport, rate })
+        }
+    }
+
+    impl From<ClassOpt> for Class {
+        fn from(c: ClassOpt) -> Class {
+            if c.dport == 0 {
+                Class::new(None, TokenBucket::new(c.rate))
+            } else {
+                Class::new(Some(c.dport), TokenBucket::new(c.rate))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod t {
+        use crate::scheduler::htb::ClassedTokenBucket;
+
+        #[test]
+        fn parse_test() {
+            let args = "--queue-size-bytes=120000 --class 4242=1000000 --class 4243=1000000";
+            let sp: Vec<_> = args.split_whitespace().collect();
+            dbg!(sp);
+            let x: ClassedTokenBucket = args.parse().unwrap();
+            assert_eq!(x.max_len_bytes, 120000);
+            assert_eq!(x.classes[0].dport, Some(4242));
+            assert_eq!(x.classes[0].common.rate_bytes_per_sec, 1000000);
+            assert_eq!(x.classes[1].dport, Some(4243));
+            assert_eq!(x.classes[1].common.rate_bytes_per_sec, 1000000);
+        }
     }
 }
 

@@ -5,8 +5,9 @@ edition = "2021"
 
 [features]
 datapath = ["tun-tap", "libc", "socket2", "pnet", "flume"]
-bin = ["datapath", "clap", "tracing-subscriber"]
+bin = ["datapath", "clap", "tracing-subscriber", "htb-argparse"]
 afd = ["rand"]
+htb-argparse = ["clap"]
 hwfq-audit = []
 
 [dependencies]
