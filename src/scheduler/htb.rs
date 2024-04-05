@@ -3,15 +3,110 @@
 //! Pace in terms of absolute rates. Any excess parent rate is distributed to classes on a FIFO
 //! basis.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time::Duration};
 
 use color_eyre::eyre::{bail, ensure, Report};
 use quanta::Instant;
+use tracing::debug;
 
 use crate::Pkt;
 
 use super::Scheduler;
 
+#[derive(Debug)]
+pub struct RateCounter {
+    epoch_rate_bytes: usize,
+    epoch_borrowed_bytes: usize,
+    epoch_dur: Duration,
+    last_update: Option<Instant>,
+}
+
+impl RateCounter {
+    pub fn new(epoch_dur: Duration) -> Self {
+        RateCounter {
+            epoch_rate_bytes: 0,
+            epoch_borrowed_bytes: 0,
+            epoch_dur,
+            last_update: None,
+        }
+    }
+
+    pub fn record_rate_bytes(
+        &mut self,
+        len: usize,
+        logger: Option<&mut csv::Writer<impl std::io::Write>>,
+    ) {
+        if self.last_update.is_none() {
+            self.last_update = Some(Instant::now());
+        }
+
+        self.epoch_rate_bytes += len;
+        self.maybe_log(logger);
+    }
+
+    pub fn record_borrowed_bytes(
+        &mut self,
+        len: usize,
+        logger: Option<&mut csv::Writer<impl std::io::Write>>,
+    ) {
+        if self.last_update.is_none() {
+            self.last_update = Some(Instant::now());
+        }
+
+        self.epoch_borrowed_bytes += len;
+        self.maybe_log(logger);
+    }
+
+    pub fn maybe_log(&mut self, logger: Option<&mut csv::Writer<impl std::io::Write>>) {
+        if let Some(last) = self.last_update {
+            let elapsed = last.elapsed();
+            if elapsed > self.epoch_dur {
+                if let Some(log) = logger {
+                    #[derive(serde::Serialize)]
+                    struct Record {
+                        unix_time_ms: u128,
+                        epoch_rate_bytes: usize,
+                        epoch_borrowed_bytes: usize,
+                        epoch_duration_ms: u128,
+                        epoch_elapsed_ms: u128,
+                    }
+
+                    if let Err(err) = log.serialize(Record {
+                        unix_time_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis(),
+                        epoch_rate_bytes: self.epoch_rate_bytes,
+                        epoch_borrowed_bytes: self.epoch_borrowed_bytes,
+                        epoch_duration_ms: self.epoch_dur.as_millis(),
+                        epoch_elapsed_ms: elapsed.as_millis(),
+                    }) {
+                        debug!(?err, "write to logger failed");
+                    }
+                }
+
+                debug!(?self.epoch_rate_bytes, ?self.epoch_borrowed_bytes, ?elapsed, "rate counter log");
+
+                self.last_update = None;
+                self.epoch_rate_bytes = 0;
+                self.epoch_borrowed_bytes = 0;
+            }
+        }
+    }
+
+    pub fn reset(&mut self) {
+        if let Some(last) = self.last_update {
+            let elapsed = last.elapsed();
+            if self.epoch_rate_bytes > 0 || self.epoch_borrowed_bytes > 0 {
+                debug!(?self.epoch_rate_bytes, ?self.epoch_borrowed_bytes, ?elapsed, "rate counter reset");
+            }
+        }
+
+        self.last_update = None;
+        self.epoch_rate_bytes = 0;
+        self.epoch_borrowed_bytes = 0;
+    }
+}
 
 #[derive(Debug)]
 pub struct TokenBucket {
@@ -53,6 +148,7 @@ impl TokenBucket {
 pub struct Class {
     pub dport: Option<u16>,
     common: TokenBucket,
+    ctr: RateCounter,
     queue: VecDeque<Pkt>,
 }
 
@@ -61,6 +157,7 @@ impl Class {
         Self {
             dport,
             common: tb,
+            ctr: RateCounter::new(Duration::from_secs(1)),
             queue: Default::default(),
         }
     }
@@ -104,14 +201,15 @@ impl Class {
 }
 
 #[derive(Debug)]
-pub struct ClassedTokenBucket {
+pub struct ClassedTokenBucket<L: std::io::Write> {
     max_len_bytes: usize,
     classes: Vec<Class>,
     dport_to_idx: Vec<(u16, usize)>,
     curr_idx: usize,
+    logger: Option<csv::Writer<L>>,
 }
 
-impl ClassedTokenBucket {
+impl ClassedTokenBucket<std::io::Empty> {
     pub fn new(
         max_len_bytes: usize,
         classes: impl IntoIterator<Item = Class>,
@@ -137,7 +235,20 @@ impl ClassedTokenBucket {
             classes: cs,
             dport_to_idx,
             curr_idx: 0,
+            logger: None,
         })
+    }
+}
+
+impl<L: std::io::Write> ClassedTokenBucket<L> {
+    pub fn with_logger<W: std::io::Write>(self, w: W) -> ClassedTokenBucket<W> {
+        ClassedTokenBucket {
+            max_len_bytes: self.max_len_bytes,
+            classes: self.classes,
+            dport_to_idx: self.dport_to_idx,
+            curr_idx: self.curr_idx,
+            logger: Some(csv::Writer::from_writer(w)),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -157,7 +268,7 @@ impl ClassedTokenBucket {
     }
 }
 
-impl Scheduler for ClassedTokenBucket {
+impl<L: std::io::Write> Scheduler for ClassedTokenBucket<L> {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         let tot_curr_len_bytes: usize = self.classes.iter().map(Class::tot_len_bytes).sum();
         ensure!(
@@ -199,6 +310,9 @@ impl Scheduler for ClassedTokenBucket {
         let stop_idx = start_idx;
         loop {
             if let Some(p) = self.classes[start_idx].try_deq() {
+                self.classes[start_idx]
+                    .ctr
+                    .record_rate_bytes(p.len(), self.logger.as_mut());
                 return Ok(Some(p));
             }
 
@@ -215,6 +329,9 @@ impl Scheduler for ClassedTokenBucket {
         loop {
             if let Some(p) = self.classes[self.curr_idx].deq() {
                 self.curr_idx = (self.curr_idx + 1) % self.classes.len();
+                self.classes[start_idx]
+                    .ctr
+                    .record_borrowed_bytes(p.len(), self.logger.as_mut());
                 return Ok(Some(p));
             }
 
@@ -250,7 +367,7 @@ pub mod parse_args {
         pub default_class: Option<ClassOpt>,
     }
 
-    impl FromStr for ClassedTokenBucket {
+    impl FromStr for ClassedTokenBucket<std::io::Empty> {
         type Err = Report;
 
         fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -261,7 +378,7 @@ pub mod parse_args {
         }
     }
 
-    impl TryFrom<Opt> for ClassedTokenBucket {
+    impl TryFrom<Opt> for ClassedTokenBucket<std::io::Empty> {
         type Error = Report;
         fn try_from(o: Opt) -> Result<Self, Self::Error> {
             ClassedTokenBucket::new(
@@ -313,7 +430,7 @@ pub mod parse_args {
             let args = "--queue-size-bytes=120000 --class 4242=1000000 --class 4243=1000000";
             let sp: Vec<_> = args.split_whitespace().collect();
             dbg!(sp);
-            let x: ClassedTokenBucket = args.parse().unwrap();
+            let x: ClassedTokenBucket<_> = args.parse().unwrap();
             assert_eq!(x.max_len_bytes, 120000);
             assert_eq!(x.classes[0].dport, Some(4242));
             assert_eq!(x.classes[0].common.rate_bytes_per_sec, 1000000);
@@ -333,8 +450,8 @@ mod t {
 
     use super::{Class, ClassedTokenBucket, TokenBucket};
 
-    fn enq_deq_packets(
-        mut s: ClassedTokenBucket,
+    fn enq_deq_packets<L: std::io::Write>(
+        mut s: ClassedTokenBucket<L>,
         mut overall: TokenBucket,
     ) -> (Duration, Vec<usize>) {
         // enqueue a bunch of 1KB dummy packets.
