@@ -16,6 +16,8 @@ yaml-rust = "0.4"
 tracing = "0.1"
 color-eyre = "0.6"
 etherparse = "0.14"
+csv = "1.3"
+serde = { version = "1", features = ["derive"] }
 tun-tap = { version = "0.1", default-features=false, features = [], optional = true }
 socket2 = { version = "0.5.3", features = ["all"], optional = true }
 pnet = { version = "0.29", optional = true }
