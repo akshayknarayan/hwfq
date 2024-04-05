@@ -1,6 +1,6 @@
-//! HTB implementation.
+//! Classed pacer implementation.
 //!
-//! Pace in terms of absolute rates. Any excess parent rate is distributed to children on a FIFO
+//! Pace in terms of absolute rates. Any excess parent rate is distributed to classes on a FIFO
 //! basis.
 
 use std::collections::VecDeque;
@@ -12,119 +12,6 @@ use crate::Pkt;
 
 use super::Scheduler;
 
-// TODO generalize later:
-//const NUM_CHILDREN: usize = 4;
-//
-//struct RateTreeCommon {
-//    child_matcher: [u16; 4],
-//    rate_bits_per_sec: usize,
-//}
-//
-//pub enum RateTree {
-//    Leaf(RateTreeCommon),
-//    NonLeaf {
-//        common: RateTreeCommon,
-//        children: [Box<Option<RateTree>>; NUM_CHILDREN],
-//    },
-//}
-//
-//impl RateTree {
-//    fn rate_bits_per_sec(&self) -> usize {
-//        match *self {
-//            Self::Leaf(RateTreeCommon {
-//                rate_bits_per_sec, ..
-//            })
-//            | Self::NonLeaf {
-//                common: RateTreeCommon {
-//                    rate_bits_per_sec, ..
-//                },
-//                ..
-//            } => rate_bits_per_sec,
-//        }
-//    }
-//
-//    fn matcher(&self) -> [u16; NUM_CHILDREN] {
-//        match self {
-//            Self::Leaf(RateTreeCommon { child_matcher, .. })
-//            | Self::NonLeaf {
-//                common: RateTreeCommon { child_matcher, .. },
-//                ..
-//            } => *child_matcher,
-//        }
-//    }
-//}
-
-//pub enum FlowTree {
-//    Leaf {
-//        common: FlowTreeCommon,
-//        queue: VecDeque<Pkt>,
-//    },
-//    NonLeaf {
-//        common: FlowTreeCommon,
-//        classifier: [u16; NUM_CHILDREN],
-//        children: [Box<Option<FlowTree>>; NUM_CHILDREN],
-//    },
-//}
-//
-//impl FlowTree {
-//    fn from_rate_tree(t: RateTree) -> Result<Self, Report> {
-//        match t {
-//            RateTree::Leaf(RateTreeCommon {
-//                rate_bits_per_sec,
-//                child_matcher,
-//            }) => Ok(Self::Leaf {
-//                common: FlowTreeCommon {
-//                    rate_bits_per_sec,
-//                    accum_tokens: 0,
-//                    last_incr: None,
-//                },
-//                queue: Default::default(),
-//            }),
-//            RateTree::NonLeaf {
-//                common:
-//                    RateTreeCommon {
-//                        rate_bits_per_sec,
-//                        child_matcher,
-//                    },
-//                mut children,
-//            } => {
-//                let tot_bits_per_sec: usize = children
-//                    .iter()
-//                    .filter_map(|x| Some(Option::as_ref(x)?.rate_bits_per_sec()))
-//                    .sum();
-//                ensure!(
-//                    tot_bits_per_sec > 0 && tot_bits_per_sec < rate_bits_per_sec,
-//                    "children rates invalid"
-//                );
-//
-//                let mut flow_tree_children: [Box<Option<FlowTree>>; NUM_CHILDREN] =
-//                    [(); NUM_CHILDREN].map(|_| Box::new(None));
-//                let mut classifiers: [u16; NUM_CHILDREN] = [0; NUM_CHILDREN];
-//                for (x, (ft_slot, class_slot)) in children
-//                    .iter_mut()
-//                    .zip(flow_tree_children.iter_mut().zip(classifiers.iter_mut()))
-//                {
-//                    if let Some(child) = x.take() {
-//                        *class_slot = child.matcher();
-//                        *ft_slot = Box::new(Some(FlowTree::from_rate_tree(child)?));
-//                    } else {
-//                        break;
-//                    }
-//                }
-//
-//                Ok(Self::NonLeaf {
-//                    common: FlowTreeCommon {
-//                        rate_bits_per_sec,
-//                        accum_tokens: 0,
-//                        last_incr: None,
-//                    },
-//                    classifier: classifiers,
-//                    children: flow_tree_children,
-//                })
-//            }
-//        }
-//    }
-//}
 
 #[derive(Debug)]
 pub struct TokenBucket {
