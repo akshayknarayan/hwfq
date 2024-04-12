@@ -1,3 +1,8 @@
+use std::fmt::Display;
+
+use color_eyre::eyre::{bail, eyre, Report};
+use etherparse::{Ipv4Header, TcpHeader, TransportHeader, UdpHeader};
+
 pub mod scheduler;
 pub use scheduler::Scheduler;
 
@@ -63,10 +68,53 @@ impl Pkt {
     pub fn is_empty(&self) -> bool {
         self.fake_len == 0
     }
-}
 
-use color_eyre::eyre::{bail, eyre, Report};
-use etherparse::{TcpHeader, TransportHeader, UdpHeader};
+    fn from_packet_headers(
+        parse_result: Result<(Ipv4Header, u16), Report>,
+        v: Vec<u8>,
+    ) -> Result<Self, (Vec<u8>, Report)> {
+        match parse_result {
+            Ok((ip_hdr, dport)) => {
+                #[cfg(test)]
+                let fake_len = v.len();
+                Ok(Pkt {
+                    ip_hdr,
+                    dport,
+                    buf: v,
+                    #[cfg(test)]
+                    fake_len,
+                })
+            }
+            Err(e) => Err((v, e)),
+        }
+    }
+
+    pub fn parse_ethernet(v: Vec<u8>) -> Result<Self, (Vec<u8>, Report)> {
+        Self::from_packet_headers(
+            etherparse::PacketHeaders::from_ethernet_slice(&v)
+                .map_err(Into::into)
+                .and_then(|hdr| {
+                    let ip_hdr = get_ipv4_hdr(&hdr)?;
+                    let dport = get_dport(&hdr)?;
+                    Ok::<_, Report>((ip_hdr, dport))
+                }),
+            v,
+        )
+    }
+
+    pub fn parse_ip(v: Vec<u8>) -> Result<Self, (Vec<u8>, Report)> {
+        Self::from_packet_headers(
+            etherparse::PacketHeaders::from_ip_slice(&v)
+                .map_err(Into::into)
+                .and_then(|hdr| {
+                    let ip_hdr = get_ipv4_hdr(&hdr)?;
+                    let dport = get_dport(&hdr)?;
+                    Ok::<_, Report>((ip_hdr, dport))
+                }),
+            v,
+        )
+    }
+}
 
 fn get_ipv4_hdr(p: &etherparse::PacketHeaders<'_>) -> Result<etherparse::Ipv4Header, Report> {
     match p.net.as_ref().ok_or_else(|| eyre!("no ip header"))? {
@@ -91,34 +139,6 @@ fn get_dport(p: &etherparse::PacketHeaders<'_>) -> Result<u16, Report> {
         }) => Ok(*destination_port),
         _ => {
             bail!("need UDP or TCP packet to get destination port");
-        }
-    }
-}
-
-impl TryFrom<Vec<u8>> for Pkt {
-    type Error = (Vec<u8>, Report);
-
-    fn try_from(v: Vec<u8>) -> Result<Self, Self::Error> {
-        let parse_result = etherparse::PacketHeaders::from_ethernet_slice(&v)
-            .map_err(Into::into)
-            .and_then(|hdr| {
-                let ip_hdr = get_ipv4_hdr(&hdr)?;
-                let dport = get_dport(&hdr)?;
-                Ok::<_, Report>((ip_hdr, dport))
-            });
-        match parse_result {
-            Ok((ip_hdr, dport)) => {
-                #[cfg(test)]
-                let fake_len = v.len();
-                Ok(Pkt {
-                    ip_hdr,
-                    dport,
-                    buf: v,
-                    #[cfg(test)]
-                    fake_len,
-                })
-            }
-            Err(e) => Err((v, e)),
         }
     }
 }
