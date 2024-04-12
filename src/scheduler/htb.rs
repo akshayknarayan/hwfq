@@ -91,6 +91,8 @@ impl RateCounter {
                 self.epoch_rate_bytes = 0;
                 self.epoch_borrowed_bytes = 0;
             }
+        } else {
+            self.last_update = Some(Instant::now());
         }
     }
 
@@ -242,12 +244,16 @@ impl ClassedTokenBucket<std::io::Empty> {
 
 impl<L: std::io::Write> ClassedTokenBucket<L> {
     pub fn with_logger<W: std::io::Write>(self, w: W) -> ClassedTokenBucket<W> {
+        self.maybe_with_logger(Some(w))
+    }
+
+    pub fn maybe_with_logger<W: std::io::Write>(self, w: Option<W>) -> ClassedTokenBucket<W> {
         ClassedTokenBucket {
             max_len_bytes: self.max_len_bytes,
             classes: self.classes,
             dport_to_idx: self.dport_to_idx,
             curr_idx: self.curr_idx,
-            logger: Some(csv::Writer::from_writer(w)),
+            logger: w.map(|x| csv::Writer::from_writer(x)),
         }
     }
 
@@ -347,7 +353,7 @@ impl<L: std::io::Write> Scheduler for ClassedTokenBucket<L> {
 
 #[cfg(feature = "htb-argparse")]
 pub mod parse_args {
-    use std::str::FromStr;
+    use std::{path::PathBuf, str::FromStr};
 
     use clap::Parser;
     use color_eyre::eyre::{eyre, Report};
@@ -365,9 +371,12 @@ pub mod parse_args {
 
         #[arg(long)]
         pub default_class: Option<ClassOpt>,
+
+        #[arg(long)]
+        pub log_file: Option<PathBuf>,
     }
 
-    impl FromStr for ClassedTokenBucket<std::io::Empty> {
+    impl FromStr for ClassedTokenBucket<std::fs::File> {
         type Err = Report;
 
         fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -378,14 +387,15 @@ pub mod parse_args {
         }
     }
 
-    impl TryFrom<Opt> for ClassedTokenBucket<std::io::Empty> {
+    impl TryFrom<Opt> for ClassedTokenBucket<std::fs::File> {
         type Error = Report;
         fn try_from(o: Opt) -> Result<Self, Self::Error> {
-            ClassedTokenBucket::new(
+            Ok(ClassedTokenBucket::new(
                 o.queue_size_bytes,
                 o.class.into_iter().map(Into::into),
                 o.default_class.map(Into::into),
-            )
+            )?
+            .maybe_with_logger(o.log_file.map(std::fs::File::create).transpose()?))
         }
     }
 
