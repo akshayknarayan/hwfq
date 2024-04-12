@@ -1,6 +1,7 @@
 use super::Scheduler;
 use crate::scheduler::common::WeightTree;
 use crate::scheduler::common::MAX_NUM_CHILDREN;
+use crate::Error;
 use crate::Pkt;
 use color_eyre::eyre::{ensure, Report};
 #[cfg(feature = "hwfq-audit")]
@@ -45,7 +46,7 @@ impl Scheduler for HierarchicalDeficitWeightedRoundRobin {
         let pkt_len = p.buf.len();
         ensure!(
             self.tree.tot_qlen() + pkt_len <= self.limit_bytes,
-            "Dropping packet"
+            Error::PacketDropped(p)
         );
 
         if self.lookup_on_src_ip {

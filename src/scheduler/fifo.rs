@@ -1,5 +1,5 @@
 use super::Scheduler;
-use crate::Pkt;
+use crate::{Error, Pkt};
 use color_eyre::eyre::{ensure, Report};
 use std::collections::VecDeque;
 use tracing::trace;
@@ -23,7 +23,7 @@ impl Fifo {
 impl Scheduler for Fifo {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         let new_qsize_bytes = self.cur_qsize_bytes + p.buf.len();
-        ensure!(new_qsize_bytes <= self.limit_bytes, "Dropping packet");
+        ensure!(new_qsize_bytes <= self.limit_bytes, Error::PacketDropped(p));
         self.cur_qsize_bytes = new_qsize_bytes;
         self.inner.push_back(p);
         trace!(pkts=?self.inner.len(), "queue size");

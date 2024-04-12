@@ -15,6 +15,41 @@ mod ip_socket;
 #[cfg(all(target_os = "linux", feature = "datapath"))]
 pub use ip_socket::IpIfaceSocket;
 
+#[derive(Debug)]
+pub enum Error {
+    PacketDropped(Pkt),
+    Other(Report),
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PacketDropped(Pkt { ip_hdr, dport, .. }) => f.write_fmt(format_args!(
+                "Dropping packet: {}.{}.{}.{} -> {}.{}.{}.{}:{}",
+                ip_hdr.source[0],
+                ip_hdr.source[1],
+                ip_hdr.source[2],
+                ip_hdr.source[3],
+                ip_hdr.destination[0],
+                ip_hdr.destination[1],
+                ip_hdr.destination[2],
+                ip_hdr.destination[3],
+                dport,
+            )),
+            Self::Other(r) => f.write_fmt(format_args!("{}", r)),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PacketDropped(_) => None,
+            Self::Other(r) => Some(r.as_ref()),
+        }
+    }
+}
+
 /// A packet buffer.
 ///
 /// This type is only exposed so that [`Scheduler`] implementations have something to store. The
