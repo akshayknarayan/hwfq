@@ -9,7 +9,7 @@ use color_eyre::eyre::{bail, ensure, Report};
 use quanta::Instant;
 use tracing::debug;
 
-use crate::Pkt;
+use crate::{Error, Pkt};
 
 use super::Scheduler;
 
@@ -279,7 +279,7 @@ impl<L: std::io::Write> Scheduler for ClassedTokenBucket<L> {
         let tot_curr_len_bytes: usize = self.classes.iter().map(Class::tot_len_bytes).sum();
         ensure!(
             p.len() + tot_curr_len_bytes < self.max_len_bytes,
-            "Dropping packet"
+            Error::PacketDropped(p)
         );
 
         if let Some((_, i)) = self.dport_to_idx.iter().find(|&&(x, _)| x == p.dport) {
@@ -287,7 +287,7 @@ impl<L: std::io::Write> Scheduler for ClassedTokenBucket<L> {
         } else if self.classes[0].dport.is_none() {
             self.classes[0].queue.push_back(p);
         } else {
-            bail!("Dropping packet");
+            bail!(Error::PacketDropped(p));
         }
 
         Ok(())
