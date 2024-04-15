@@ -15,6 +15,7 @@ use super::Scheduler;
 
 #[derive(Debug)]
 pub struct RateCounter {
+    class: Option<u16>,
     epoch_rate_bytes: usize,
     epoch_borrowed_bytes: usize,
     epoch_dur: Duration,
@@ -22,8 +23,9 @@ pub struct RateCounter {
 }
 
 impl RateCounter {
-    pub fn new(epoch_dur: Duration) -> Self {
+    pub fn new(class: Option<u16>, epoch_dur: Duration) -> Self {
         RateCounter {
+            class,
             epoch_rate_bytes: 0,
             epoch_borrowed_bytes: 0,
             epoch_dur,
@@ -65,6 +67,7 @@ impl RateCounter {
                     #[derive(serde::Serialize)]
                     struct Record {
                         unix_time_ms: u128,
+                        class: Option<u16>,
                         epoch_rate_bytes: usize,
                         epoch_borrowed_bytes: usize,
                         epoch_duration_ms: u128,
@@ -76,6 +79,7 @@ impl RateCounter {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_millis(),
+                        class: self.class,
                         epoch_rate_bytes: self.epoch_rate_bytes,
                         epoch_borrowed_bytes: self.epoch_borrowed_bytes,
                         epoch_duration_ms: self.epoch_dur.as_millis(),
@@ -159,7 +163,7 @@ impl Class {
         Self {
             dport,
             common: tb,
-            ctr: RateCounter::new(Duration::from_secs(1)),
+            ctr: RateCounter::new(dport, Duration::from_secs(1)),
             queue: Default::default(),
         }
     }
@@ -334,10 +338,10 @@ impl<L: std::io::Write> Scheduler for ClassedTokenBucket<L> {
         let stop_idx = self.curr_idx;
         loop {
             if let Some(p) = self.classes[self.curr_idx].deq() {
-                self.curr_idx = (self.curr_idx + 1) % self.classes.len();
-                self.classes[start_idx]
+                self.classes[self.curr_idx]
                     .ctr
                     .record_borrowed_bytes(p.len(), self.logger.as_mut());
+                self.curr_idx = (self.curr_idx + 1) % self.classes.len();
                 return Ok(Some(p));
             }
 
