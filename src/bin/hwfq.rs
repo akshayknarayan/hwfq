@@ -3,7 +3,7 @@ use color_eyre::{
     eyre::{eyre, Report},
     Help,
 };
-use hwfq::scheduler::common::WeightTree;
+use hwfq::scheduler::weight_tree::WeightTree;
 use hwfq::scheduler::{
     ApproximateFairDropping, Drr, Fifo, HierarchicalApproximateFairDropping,
     HierarchicalDeficitWeightedRoundRobin,

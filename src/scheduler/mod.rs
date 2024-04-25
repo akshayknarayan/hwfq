@@ -19,18 +19,22 @@ pub trait Scheduler {
     fn dbg(&self) {}
 }
 
-pub mod common;
-
 mod fifo;
 pub use fifo::Fifo;
 
 mod drr;
 pub use drr::Drr;
 
-mod hdwrr;
-pub use hdwrr::HierarchicalDeficitWeightedRoundRobin;
+#[cfg(any(feature = "htb", feature = "afd", feature = "hdwrr"))]
+pub mod weight_tree;
 
+#[cfg(feature = "htb")]
 pub mod htb;
+
+#[cfg(feature = "hdwrr")]
+mod hdwrr;
+#[cfg(feature = "hdwrr")]
+pub use hdwrr::HierarchicalDeficitWeightedRoundRobin;
 
 #[cfg(feature = "afd")]
 mod afd;
@@ -43,16 +47,3 @@ pub use {
     afd::ApproximateFairDropping, hafd::HierarchicalApproximateFairDropping,
     wafd::WeightedApproximateFairDropping,
 };
-
-fn fnv(src: [u8; 4], dst: [u8; 4], queues: u64) -> u8 {
-    const FNV1_64_INIT: u64 = 0xcbf29ce484222325u64;
-    const FNV_64_PRIME: u64 = 0x100000001b3u64;
-
-    let mut hash = FNV1_64_INIT;
-    for b in src.iter().chain(dst.iter()) {
-        hash ^= *b as u64;
-        hash = u64::wrapping_mul(hash, FNV_64_PRIME);
-    }
-
-    (hash % queues) as u8
-}

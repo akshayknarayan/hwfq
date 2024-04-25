@@ -1,6 +1,6 @@
 use super::Scheduler;
-use crate::scheduler::common::parse_ip;
-use crate::scheduler::common::WeightTree;
+use crate::scheduler::weight_tree::parse_ip;
+use crate::scheduler::weight_tree::WeightTree;
 use crate::Pkt;
 use color_eyre::eyre::Report;
 use rand::rngs::StdRng;
@@ -609,7 +609,7 @@ impl Scheduler for HierarchicalApproximateFairDropping {
 
 #[cfg(test)]
 mod t {
-    use crate::{scheduler::common::WeightTree, Pkt, Scheduler};
+    use crate::{scheduler::weight_tree::WeightTree, Pkt, Scheduler};
 
     fn init() {
         use std::sync::Once;

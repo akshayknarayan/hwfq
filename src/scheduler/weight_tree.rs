@@ -119,10 +119,10 @@ impl WeightTree {
     pub fn from_file(file: impl AsRef<std::path::Path>) -> Result<Self, Report> {
         let cfg_str = std::fs::read_to_string(file.as_ref())
             .wrap_err(eyre!("Could not read {:?}", file.as_ref()))?;
-        Self::from_str(&cfg_str)
+        Self::from_cfg(&cfg_str)
     }
 
-    pub fn from_str(cfg: &str) -> Result<Self, Report> {
+    pub fn from_cfg(cfg: &str) -> Result<Self, Report> {
         let yaml =
             yaml_rust::YamlLoader::load_from_str(cfg).wrap_err(eyre!("Error reading {:?}", cfg))?;
         ensure!(yaml.len() == 1, "Tree cfg needs exactly one element");
@@ -148,7 +148,7 @@ impl WeightTree {
     pub fn leaf(weight: usize) -> Self {
         const INIT_VEC: Vec<u32> = Vec::new();
         WeightTree::Leaf {
-            weight: weight,
+            weight,
             ips: INIT_VEC,
         }
     }

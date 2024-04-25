@@ -1,10 +1,23 @@
-use super::{fnv, Scheduler};
+use super::Scheduler;
 use crate::{Error, Pkt};
 use color_eyre::eyre::{ensure, Report};
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
 
 // Define constant max number of queues.
 const MAX_QUEUES: usize = 32;
+
+fn fnv(src: [u8; 4], dst: [u8; 4], queues: u64) -> u8 {
+    const FNV1_64_INIT: u64 = 0xcbf29ce484222325u64;
+    const FNV_64_PRIME: u64 = 0x100000001b3u64;
+
+    let mut hash = FNV1_64_INIT;
+    for b in src.iter().chain(dst.iter()) {
+        hash ^= *b as u64;
+        hash = u64::wrapping_mul(hash, FNV_64_PRIME);
+    }
+
+    (hash % queues) as u8
+}
 
 #[derive(Default)]
 pub struct Drr {
