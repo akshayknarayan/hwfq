@@ -1,6 +1,6 @@
 use super::Scheduler;
-use crate::scheduler::common::WeightTree;
-use crate::scheduler::common::MAX_NUM_CHILDREN;
+use crate::scheduler::weight_tree::WeightTree;
+use crate::scheduler::weight_tree::MAX_NUM_CHILDREN;
 use crate::Error;
 use crate::Pkt;
 use color_eyre::eyre::{ensure, Report};
@@ -391,7 +391,7 @@ impl WeightTree {
 #[cfg(test)]
 mod t {
     use super::{Scheduler, WeightTree};
-    use crate::scheduler::common::parse_ip;
+    use crate::scheduler::weight_tree::parse_ip;
     use crate::Pkt;
     use tracing::info;
 
@@ -670,7 +670,7 @@ root:
         weight: 2
         ";
 
-        let wt = WeightTree::from_str(cfg_str).unwrap();
+        let wt = WeightTree::from_cfg(cfg_str).unwrap();
         dbg!(&wt);
         assert!(
             matches!(
