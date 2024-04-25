@@ -25,7 +25,7 @@ pub use fifo::Fifo;
 mod drr;
 pub use drr::Drr;
 
-#[cfg(any(feature = "htb", feature = "afd", feature = "hdwrr"))]
+#[cfg(any(feature = "afd", feature = "hdwrr"))]
 pub mod weight_tree;
 
 #[cfg(feature = "htb")]
