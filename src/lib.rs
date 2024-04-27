@@ -10,6 +10,7 @@ pub use scheduler::Scheduler;
 mod datapath;
 #[cfg(feature = "datapath")]
 pub use datapath::Datapath;
+
 #[cfg(all(target_os = "linux", feature = "datapath"))]
 mod ip_socket;
 #[cfg(all(target_os = "linux", feature = "datapath"))]
