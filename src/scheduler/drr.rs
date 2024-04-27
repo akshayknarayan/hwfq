@@ -113,4 +113,21 @@ impl Scheduler for Drr {
             self.deq_curr_qid = (self.deq_curr_qid + 1) % self.queues.len();
         }
     }
+
+    fn len_bytes(&self) -> usize {
+        self.curr_qsizes.iter().sum()
+    }
+
+    fn len_packets(&self) -> usize {
+        self.queues.iter().map(VecDeque::len).sum()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.curr_qsizes.iter().all(|x| *x == 0)
+    }
+
+    fn set_max_len_bytes(&mut self, bytes: usize) -> Result<(), Report> {
+        self.limit_bytes = bytes;
+        Ok(())
+    }
 }

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::f64::consts::E;
+use std::time::Duration;
 use std::time::SystemTime;
 use tracing::debug;
 use tracing::error;
@@ -184,7 +185,24 @@ impl Scheduler for WeightedApproximateFairDropping {
         Ok(Some(p))
     }
 
-    fn dbg(&self) {
+    fn len_bytes(&self) -> usize {
+        self.inner.iter().map(Pkt::len).sum()
+    }
+
+    fn len_packets(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    fn set_max_len_bytes(&mut self, _bytes: usize) -> Result<(), Report> {
+        // not implemented
+        Ok(())
+    }
+
+    fn dbg(&mut self, _: Duration) {
         self.shadow_buffer.dbg();
         debug!(?self.inner, "wafd");
     }

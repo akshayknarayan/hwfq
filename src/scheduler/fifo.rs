@@ -39,4 +39,21 @@ impl Scheduler for Fifo {
             None => Ok(None),
         }
     }
+
+    fn len_bytes(&self) -> usize {
+        self.cur_qsize_bytes
+    }
+
+    fn len_packets(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    fn set_max_len_bytes(&mut self, bytes: usize) -> Result<(), Report> {
+        self.limit_bytes = bytes;
+        Ok(())
+    }
 }

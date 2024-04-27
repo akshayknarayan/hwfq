@@ -7,6 +7,7 @@ use color_eyre::eyre::{ensure, Report};
 #[cfg(feature = "hwfq-audit")]
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::time::Duration;
 use tracing::debug;
 
 /// Implement a hierarchical deficit round-robin [`Scheduler`].
@@ -73,8 +74,21 @@ impl Scheduler for HierarchicalDeficitWeightedRoundRobin {
         }
     }
 
-    fn dbg(&self) {
-        tracing::info!(?self.tree, "hdwrr tree state");
+    fn len_bytes(&self) -> usize {
+        self.tree.tot_qlen()
+    }
+
+    fn len_packets(&self) -> usize {
+        self.tree.tot_pkts()
+    }
+
+    fn set_max_len_bytes(&mut self, bytes: usize) -> Result<(), Report> {
+        self.limit_bytes = bytes;
+        Ok(())
+    }
+
+    fn dbg(&mut self, epoch_dur: Duration) {
+        tracing::info!(?epoch_dur, ?self.tree, "hdwrr tree state");
     }
 }
 
@@ -149,6 +163,13 @@ impl FlowTree {
     fn tot_qlen(&self) -> usize {
         match self {
             &FlowTree::NonLeaf { curr_qlen, .. } | &FlowTree::Leaf { curr_qlen, .. } => curr_qlen,
+        }
+    }
+
+    fn tot_pkts(&self) -> usize {
+        match self {
+            FlowTree::Leaf { queue, .. } => queue.len(),
+            FlowTree::NonLeaf { children, .. } => children.iter().map(|t| t.tot_pkts()).sum(),
         }
     }
 

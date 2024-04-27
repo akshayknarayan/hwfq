@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::Pkt;
 use color_eyre::eyre::Report;
 
@@ -15,8 +17,27 @@ pub trait Scheduler {
     /// and `Some(dequeued_packet)` otherwise.
     fn deq(&mut self) -> Result<Option<Pkt>, Report>;
 
+    /// Set the maximum length of the scheduler's queue in bytes.
+    fn set_max_len_bytes(&mut self, bytes: usize) -> Result<(), Report>;
+
+    /// The current length of the scheduler's queue in bytes.
+    fn len_bytes(&self) -> usize;
+
+    /// The current length of the scheduler's queue in packets.
+    ///
+    /// Note: Packets are not necessarily constant size, so this is not always the same information
+    /// as [`Scheduler::len_bytes()`].
+    fn len_packets(&self) -> usize;
+
+    /// Whether the scheduler's queue is currently empty.
+    ///
+    /// If this returns `true`, `deq` *must* return either `Ok(None)` or `Err(_)`.
+    fn is_empty(&self) -> bool {
+        self.len_packets() == 0
+    }
+
     /// Called periodically when it is time to dump debug info logs.
-    fn dbg(&self) {}
+    fn dbg(&mut self, _epoch_dur: Duration) {}
 }
 
 mod fifo;
