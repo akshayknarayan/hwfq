@@ -18,97 +18,69 @@ pub struct RateCounter {
     class: Option<u16>,
     epoch_rate_bytes: usize,
     epoch_borrowed_bytes: usize,
-    epoch_dur: Duration,
-    last_update: Option<Instant>,
 }
 
 impl RateCounter {
-    pub fn new(class: Option<u16>, epoch_dur: Duration) -> Self {
+    pub fn new(class: Option<u16>) -> Self {
         RateCounter {
             class,
             epoch_rate_bytes: 0,
             epoch_borrowed_bytes: 0,
-            epoch_dur,
-            last_update: None,
         }
     }
 
-    pub fn record_rate_bytes(
-        &mut self,
-        len: usize,
-        logger: Option<&mut csv::Writer<impl std::io::Write>>,
-    ) {
-        if self.last_update.is_none() {
-            self.last_update = Some(Instant::now());
-        }
-
+    pub fn record_rate_bytes(&mut self, len: usize) {
         self.epoch_rate_bytes += len;
-        self.maybe_log(logger);
     }
 
-    pub fn record_borrowed_bytes(
+    pub fn record_borrowed_bytes(&mut self, len: usize) {
+        self.epoch_borrowed_bytes += len;
+    }
+
+    pub fn log(
         &mut self,
-        len: usize,
+        elapsed: Duration,
         logger: Option<&mut csv::Writer<impl std::io::Write>>,
     ) {
-        if self.last_update.is_none() {
-            self.last_update = Some(Instant::now());
+        if self.epoch_rate_bytes == 0 && self.epoch_borrowed_bytes == 0 {
+            return;
         }
 
-        self.epoch_borrowed_bytes += len;
-        self.maybe_log(logger);
-    }
-
-    pub fn maybe_log(&mut self, logger: Option<&mut csv::Writer<impl std::io::Write>>) {
-        if let Some(last) = self.last_update {
-            let elapsed = last.elapsed();
-            if elapsed > self.epoch_dur {
-                if let Some(log) = logger {
-                    #[derive(serde::Serialize)]
-                    struct Record {
-                        unix_time_ms: u128,
-                        class: Option<u16>,
-                        epoch_rate_bytes: usize,
-                        epoch_borrowed_bytes: usize,
-                        epoch_duration_ms: u128,
-                        epoch_elapsed_ms: u128,
-                    }
-
-                    if let Err(err) = log.serialize(Record {
-                        unix_time_ms: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis(),
-                        class: self.class,
-                        epoch_rate_bytes: self.epoch_rate_bytes,
-                        epoch_borrowed_bytes: self.epoch_borrowed_bytes,
-                        epoch_duration_ms: self.epoch_dur.as_millis(),
-                        epoch_elapsed_ms: elapsed.as_millis(),
-                    }) {
-                        debug!(?err, "write to logger failed");
-                    }
-                }
-
-                debug!(?self.epoch_rate_bytes, ?self.epoch_borrowed_bytes, ?elapsed, "rate counter log");
-
-                self.last_update = None;
-                self.epoch_rate_bytes = 0;
-                self.epoch_borrowed_bytes = 0;
+        if let Some(log) = logger {
+            #[derive(serde::Serialize)]
+            struct Record {
+                unix_time_ms: u128,
+                class: Option<u16>,
+                epoch_rate_bytes: usize,
+                epoch_borrowed_bytes: usize,
+                epoch_elapsed_ms: u128,
             }
-        } else {
-            self.last_update = Some(Instant::now());
+
+            if let Err(err) = log.serialize(Record {
+                unix_time_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+                class: self.class,
+                epoch_rate_bytes: self.epoch_rate_bytes,
+                epoch_borrowed_bytes: self.epoch_borrowed_bytes,
+                epoch_elapsed_ms: elapsed.as_millis(),
+            }) {
+                debug!(?err, "write to logger failed");
+            }
         }
+
+        debug!(?self.epoch_rate_bytes, ?self.epoch_borrowed_bytes, ?elapsed, "rate counter log");
+
+        self.epoch_rate_bytes = 0;
+        self.epoch_borrowed_bytes = 0;
     }
 
     pub fn reset(&mut self) {
-        if let Some(last) = self.last_update {
-            let elapsed = last.elapsed();
-            if self.epoch_rate_bytes > 0 || self.epoch_borrowed_bytes > 0 {
-                debug!(?self.epoch_rate_bytes, ?self.epoch_borrowed_bytes, ?elapsed, "rate counter reset");
-            }
+        if self.epoch_rate_bytes > 0 || self.epoch_borrowed_bytes > 0 {
+            debug!(?self.epoch_rate_bytes, ?self.epoch_borrowed_bytes, "rate counter reset");
         }
 
-        self.last_update = None;
         self.epoch_rate_bytes = 0;
         self.epoch_borrowed_bytes = 0;
     }
@@ -163,7 +135,7 @@ impl Class {
         Self {
             dport,
             common: tb,
-            ctr: RateCounter::new(dport, Duration::from_secs(1)),
+            ctr: RateCounter::new(dport),
             queue: Default::default(),
         }
     }
@@ -203,6 +175,10 @@ impl Class {
 
     fn deq(&mut self) -> Option<Pkt> {
         self.queue.pop_front()
+    }
+
+    fn log(&mut self, elapsed: Duration, logger: Option<&mut csv::Writer<impl std::io::Write>>) {
+        self.ctr.log(elapsed, logger)
     }
 }
 
@@ -260,22 +236,6 @@ impl<L: std::io::Write> ClassedTokenBucket<L> {
             logger: w.map(|x| csv::Writer::from_writer(x)),
         }
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.classes.iter().all(Class::is_empty)
-    }
-
-    pub fn tot_len_bytes(&self) -> usize {
-        self.classes.iter().map(Class::tot_len_bytes).sum()
-    }
-
-    pub fn tot_len_pkts(&self) -> usize {
-        self.classes.iter().map(Class::tot_len_pkts).sum()
-    }
-
-    pub fn set_max_len_bytes(&mut self, bytes: usize) {
-        self.max_len_bytes = bytes;
-    }
 }
 
 impl<L: std::io::Write> Scheduler for ClassedTokenBucket<L> {
@@ -320,9 +280,7 @@ impl<L: std::io::Write> Scheduler for ClassedTokenBucket<L> {
         let stop_idx = start_idx;
         loop {
             if let Some(p) = self.classes[start_idx].try_deq() {
-                self.classes[start_idx]
-                    .ctr
-                    .record_rate_bytes(p.len(), self.logger.as_mut());
+                self.classes[start_idx].ctr.record_rate_bytes(p.len());
                 return Ok(Some(p));
             }
 
@@ -340,7 +298,7 @@ impl<L: std::io::Write> Scheduler for ClassedTokenBucket<L> {
             if let Some(p) = self.classes[self.curr_idx].deq() {
                 self.classes[self.curr_idx]
                     .ctr
-                    .record_borrowed_bytes(p.len(), self.logger.as_mut());
+                    .record_borrowed_bytes(p.len());
                 self.curr_idx = (self.curr_idx + 1) % self.classes.len();
                 return Ok(Some(p));
             }
@@ -352,6 +310,29 @@ impl<L: std::io::Write> Scheduler for ClassedTokenBucket<L> {
         }
 
         Ok(None)
+    }
+
+    fn len_bytes(&self) -> usize {
+        self.classes.iter().map(Class::tot_len_bytes).sum()
+    }
+
+    fn len_packets(&self) -> usize {
+        self.classes.iter().map(Class::tot_len_pkts).sum()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.classes.iter().all(Class::is_empty)
+    }
+
+    fn set_max_len_bytes(&mut self, bytes: usize) -> Result<(), Report> {
+        self.max_len_bytes = bytes;
+        Ok(())
+    }
+
+    fn dbg(&mut self, epoch_dur: Duration) {
+        for c in &mut self.classes {
+            c.log(epoch_dur, self.logger.as_mut())
+        }
     }
 }
 
