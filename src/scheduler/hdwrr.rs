@@ -44,7 +44,7 @@ impl HierarchicalDeficitWeightedRoundRobin {
 
 impl Scheduler for HierarchicalDeficitWeightedRoundRobin {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
-        let pkt_len = p.buf.len();
+        let pkt_len = p.len();
         ensure!(
             self.tree.tot_qlen() + pkt_len <= self.limit_bytes,
             Error::PacketDropped(p)
@@ -180,7 +180,7 @@ impl FlowTree {
                 ref mut curr_qlen,
                 ..
             } => {
-                *curr_qlen += p.buf.len();
+                *curr_qlen += p.len();
                 queue.push_back(p);
             }
             FlowTree::NonLeaf {
@@ -205,7 +205,7 @@ impl FlowTree {
                     };
 
                     if classify[i].iter().any(|i| ip == *i) {
-                        *curr_qlen += p.buf.len();
+                        *curr_qlen += p.len();
 
                         #[cfg(feature = "hwfq-audit")]
                         if !curr_audit_state[i] && children[i].tot_qlen() == 0 {
@@ -251,14 +251,14 @@ impl FlowTree {
                 ref mut queue,
                 ..
             } => {
-                if !queue.is_empty() && *deficit >= queue.front().unwrap().buf.len() {
+                if !queue.is_empty() && *deficit >= queue.front().unwrap().len() {
                     let p = queue.pop_front().unwrap();
                     if queue.is_empty() {
                         *deficit = 0;
                         *curr_qlen = 0;
                     } else {
-                        *deficit -= p.buf.len();
-                        *curr_qlen -= p.buf.len();
+                        *deficit -= p.len();
+                        *curr_qlen -= p.len();
                     }
 
                     return Some(p);
@@ -516,6 +516,7 @@ mod t {
         let dst_ip = [42, 2, 0, 0];
 
         assert_eq!(hwfq.tree.tot_qlen(), 0, "");
+        assert_eq!(hwfq.tree.tot_pkts(), 0, "");
         // enqueue a bunch of packets
         for _ in 0..100 {
             hwfq.enq(Pkt {
@@ -562,6 +563,7 @@ mod t {
             .unwrap();
         }
 
+        assert_eq!(hwfq.tree.tot_pkts(), 300, "");
         assert_eq!(hwfq.tree.tot_qlen(), 300 * 100, "");
 
         let mut b_cnt = 0;
