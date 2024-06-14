@@ -16,9 +16,9 @@
 
 use color_eyre::eyre::{bail, ensure, eyre, Report, WrapErr};
 use std::process::Command;
+use std::time::SystemTime;
 use tracing::{debug, info, trace};
 use tun_tap::Iface;
-use std::time::SystemTime;
 
 #[cfg(target_os = "linux")]
 mod ip_socket;
@@ -254,7 +254,7 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
                 .recv(&ticker_r, |bytes| {
                     let mut q = queue.try_borrow_mut().unwrap();
                     accum_tokens += bytes.unwrap() as isize;
-                    // debug!("Accumtokenupdate Time: {:?}, accum_tokens: {}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), accum_tokens);
+                    // trace!("Accumtokenupdate Time: {:?}, accum_tokens: {}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(), accum_tokens);
                     while accum_tokens > 0 {
                         match q.deq() {
                             Ok(None) => {
@@ -296,7 +296,7 @@ impl<S: Scheduler + Send + 'static> OutputPort<S> {
 
                                 accum_tokens -= p.buf.len() as isize;
                                 let Pkt { ip_hdr, buf } = p;
-                                debug!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "forwarding packet");
+                                trace!(src = ?ip_hdr.source, dst = ?ip_hdr.destination, "forwarding packet");
                                 if let Err(e) = self.fwd.send(&buf) {
                                     debug!(?e, "fwd error");
                                 }
