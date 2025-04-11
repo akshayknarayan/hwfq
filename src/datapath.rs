@@ -22,7 +22,7 @@ use tracing::{debug, info, trace};
 use tun_tap::Iface;
 
 use crate::scheduler::Scheduler;
-use crate::{get_dport, get_ipv4_hdr, Pkt};
+use crate::{get_ipv4_hdr, get_ports, Pkt};
 
 /// Manage pacing, scheduling (via the parameter), and forwarding packets to a Unix pipe.
 ///
@@ -102,7 +102,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
                 }
             };
 
-            let dport = match get_dport(&hdr) {
+            let (sport, dport) = match get_ports(&hdr) {
                 Ok(p) => p,
                 Err(e) => {
                     trace!(err = %format!("{:#?}", e), "could not parse packet as ipv4");
@@ -119,6 +119,7 @@ impl<S: Scheduler + Send + 'static> Datapath<S> {
             let out_buf = &buf[0..len];
             fwd.send(Pkt {
                 ip_hdr,
+                sport,
                 dport,
                 buf: out_buf.to_vec(),
                 #[cfg(test)]
