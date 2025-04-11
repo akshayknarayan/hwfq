@@ -15,7 +15,7 @@ impl IpIfaceSocket {
     pub fn new(iface: String) -> Result<Self, Report> {
         let sk = Socket::new(Domain::IPV4, Type::RAW, Some(libc::IPPROTO_RAW.into()))
             .wrap_err("could not create raw ip socket")?;
-        sk.set_header_included(true)
+        sk.set_header_included_v4(true)
             .wrap_err("set header included sockopt")?;
         let iface_str_bytes = iface.as_bytes();
         ensure!(
