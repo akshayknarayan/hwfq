@@ -63,6 +63,7 @@ impl std::error::Error for Error {
 #[derive(Clone, Debug)]
 pub struct Pkt {
     ip_hdr: etherparse::Ipv4Header,
+    sport: u16,
     dport: u16,
     buf: Vec<u8>,
     #[cfg(test)]
@@ -106,15 +107,16 @@ impl Pkt {
     }
 
     fn from_packet_headers(
-        parse_result: Result<(Ipv4Header, u16), Report>,
+        parse_result: Result<(Ipv4Header, u16, u16), Report>,
         v: Vec<u8>,
     ) -> Result<Self, (Vec<u8>, Report)> {
         match parse_result {
-            Ok((ip_hdr, dport)) => {
+            Ok((ip_hdr, sport, dport)) => {
                 #[cfg(test)]
                 let fake_len = v.len();
                 Ok(Pkt {
                     ip_hdr,
+                    sport,
                     dport,
                     buf: v,
                     #[cfg(test)]
@@ -131,8 +133,8 @@ impl Pkt {
                 .map_err(Into::into)
                 .and_then(|hdr| {
                     let ip_hdr = get_ipv4_hdr(&hdr)?;
-                    let dport = get_dport(&hdr)?;
-                    Ok::<_, Report>((ip_hdr, dport))
+                    let (sport, dport) = get_ports(&hdr)?;
+                    Ok::<_, Report>((ip_hdr, sport, dport))
                 }),
             v,
         )
@@ -144,8 +146,8 @@ impl Pkt {
                 .map_err(Into::into)
                 .and_then(|hdr| {
                     let ip_hdr = get_ipv4_hdr(&hdr)?;
-                    let dport = get_dport(&hdr)?;
-                    Ok::<_, Report>((ip_hdr, dport))
+                    let (sport, dport) = get_ports(&hdr)?;
+                    Ok::<_, Report>((ip_hdr, sport, dport))
                 }),
             v,
         )
@@ -161,18 +163,22 @@ fn get_ipv4_hdr(p: &etherparse::PacketHeaders<'_>) -> Result<etherparse::Ipv4Hea
     }
 }
 
-fn get_dport(p: &etherparse::PacketHeaders<'_>) -> Result<u16, Report> {
+fn get_ports(p: &etherparse::PacketHeaders<'_>) -> Result<(u16, u16), Report> {
     match p
         .transport
         .as_ref()
         .ok_or_else(|| eyre!("no transport header"))?
     {
         TransportHeader::Udp(UdpHeader {
-            destination_port, ..
+            source_port,
+            destination_port,
+            ..
         })
         | TransportHeader::Tcp(TcpHeader {
-            destination_port, ..
-        }) => Ok(*destination_port),
+            source_port,
+            destination_port,
+            ..
+        }) => Ok((*source_port, *destination_port)),
         _ => {
             bail!("need UDP or TCP packet to get destination port");
         }
