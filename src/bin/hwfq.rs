@@ -71,7 +71,7 @@ pub fn main() -> Result<(), Report> {
                     opt.rate_bytes_per_sec
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
                 ),
-                Drr::new(opt.queue_size_bytes),
+                Drr::<false>::new(opt.queue_size_bytes),
             )
             .unwrap();
             s.run().unwrap();

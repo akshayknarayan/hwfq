@@ -6,10 +6,9 @@ use std::collections::{hash_map::Entry, HashMap, VecDeque};
 // Define constant max number of queues.
 const MAX_QUEUES: usize = 32;
 
-fn fnv(src: [u8; 4], dst: [u8; 4], queues: u64) -> u8 {
-    const FNV1_64_INIT: u64 = 0xcbf29ce484222325u64;
-    const FNV_64_PRIME: u64 = 0x100000001b3u64;
-
+const FNV1_64_INIT: u64 = 0xcbf29ce484222325u64;
+const FNV_64_PRIME: u64 = 0x100000001b3u64;
+fn fnv_ips(src: [u8; 4], dst: [u8; 4], queues: u64) -> u8 {
     let mut hash = FNV1_64_INIT;
     for b in src.iter().chain(dst.iter()) {
         hash ^= *b as u64;
@@ -19,8 +18,23 @@ fn fnv(src: [u8; 4], dst: [u8; 4], queues: u64) -> u8 {
     (hash % queues) as u8
 }
 
+fn fnv_ports(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, queues: u64) -> u8 {
+    let mut hash = FNV1_64_INIT;
+    for b in src
+        .iter()
+        .chain(dst.iter())
+        .chain(sport.to_be_bytes().iter())
+        .chain(dport.to_be_bytes().iter())
+    {
+        hash ^= *b as u64;
+        hash = u64::wrapping_mul(hash, FNV_64_PRIME);
+    }
+
+    (hash % queues) as u8
+}
+
 #[derive(Default)]
-pub struct Drr {
+pub struct Drr<const HASH_PORTS: bool> {
     limit_bytes: usize,
     queues: [VecDeque<Pkt>; MAX_QUEUES],
     curr_qsizes: [usize; MAX_QUEUES],
@@ -33,7 +47,7 @@ pub struct Drr {
     deq_curr_qid: usize,
 }
 
-impl Drr {
+impl<const HASH_PORTS: bool> Drr<HASH_PORTS> {
     pub fn new(limit_bytes: usize) -> Self {
         Self {
             limit_bytes,
@@ -48,7 +62,7 @@ impl Drr {
     }
 }
 
-impl Scheduler for Drr {
+impl<const HASH_PORTS: bool> Scheduler for Drr<HASH_PORTS> {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         let curr_tot_qsize: usize = self.curr_qsizes.iter().sum();
         ensure!(
@@ -57,7 +71,18 @@ impl Scheduler for Drr {
         );
 
         // hash p into a queue
-        let flow_id = fnv(p.ip_hdr.source, p.ip_hdr.destination, MAX_QUEUES as u64);
+        let flow_id = if HASH_PORTS {
+            fnv_ports(
+                p.ip_hdr.source,
+                p.ip_hdr.destination,
+                p.sport,
+                p.dport,
+                MAX_QUEUES as u64,
+            )
+        } else {
+            fnv_ips(p.ip_hdr.source, p.ip_hdr.destination, MAX_QUEUES as u64)
+        };
+
         match self.queue_map.entry(flow_id) {
             Entry::Occupied(entry) => {
                 let queue_id = entry.get();
