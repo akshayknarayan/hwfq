@@ -627,7 +627,8 @@ impl Scheduler for HierarchicalApproximateFairDropping {
 
 #[cfg(test)]
 mod t {
-    use crate::{scheduler::weight_tree::WeightTree, Pkt, Scheduler};
+    use crate::scheduler::afd::t::enq_rate;
+    use crate::{scheduler::weight_tree::WeightTree, Scheduler};
 
     fn init() {
         use std::sync::Once;
@@ -689,54 +690,15 @@ mod t {
         let e_ingress_rate = 3;
 
         for _ in 0..10000 {
-            for _ in 0..b_ingress_rate {
-                hwfq.enq(Pkt {
-                    ip_hdr: etherparse::Ipv4Header::new(
-                        100,
-                        64,
-                        etherparse::IpNumber::TCP,
-                        b_ip,
-                        dst_ip,
-                    )
-                    .unwrap(),
-                    dport: 0,
-                    fake_len: 100,
-                    buf: vec![],
-                })
-                .unwrap();
-            }
-            for _ in 0..d_ingress_rate {
-                hwfq.enq(Pkt {
-                    ip_hdr: etherparse::Ipv4Header::new(
-                        100,
-                        64,
-                        etherparse::IpNumber::TCP,
-                        d_ip,
-                        dst_ip,
-                    )
-                    .unwrap(),
-                    dport: 0,
-                    fake_len: 100,
-                    buf: vec![],
-                })
-                .unwrap();
-            }
-            for _ in 0..e_ingress_rate {
-                hwfq.enq(Pkt {
-                    ip_hdr: etherparse::Ipv4Header::new(
-                        100,
-                        64,
-                        etherparse::IpNumber::TCP,
-                        e_ip,
-                        dst_ip,
-                    )
-                    .unwrap(),
-                    dport: 0,
-                    fake_len: 100,
-                    buf: vec![],
-                })
-                .unwrap();
-            }
+            enq_rate(
+                &mut hwfq,
+                dst_ip,
+                [
+                    (b_ip, b_ingress_rate),
+                    (d_ip, d_ingress_rate),
+                    (e_ip, e_ingress_rate),
+                ],
+            );
 
             // Attempt to dequeue 3 packets.
             for _ in 0..3 {
@@ -792,54 +754,15 @@ mod t {
         let egress_rate = 9;
 
         for _ in 0..100000 {
-            for _ in 0..b_ingress_rate {
-                hwfq.enq(Pkt {
-                    ip_hdr: etherparse::Ipv4Header::new(
-                        100,
-                        64,
-                        etherparse::IpNumber::TCP,
-                        b_ip,
-                        dst_ip,
-                    )
-                    .unwrap(),
-                    dport: 0,
-                    fake_len: 100,
-                    buf: vec![],
-                })
-                .unwrap();
-            }
-            for _ in 0..d_ingress_rate {
-                hwfq.enq(Pkt {
-                    ip_hdr: etherparse::Ipv4Header::new(
-                        100,
-                        64,
-                        etherparse::IpNumber::TCP,
-                        d_ip,
-                        dst_ip,
-                    )
-                    .unwrap(),
-                    dport: 0,
-                    fake_len: 100,
-                    buf: vec![],
-                })
-                .unwrap();
-            }
-            for _ in 0..e_ingress_rate {
-                hwfq.enq(Pkt {
-                    ip_hdr: etherparse::Ipv4Header::new(
-                        100,
-                        64,
-                        etherparse::IpNumber::TCP,
-                        e_ip,
-                        dst_ip,
-                    )
-                    .unwrap(),
-                    dport: 0,
-                    fake_len: 100,
-                    buf: vec![],
-                })
-                .unwrap();
-            }
+            enq_rate(
+                &mut hwfq,
+                dst_ip,
+                [
+                    (b_ip, b_ingress_rate),
+                    (d_ip, d_ingress_rate),
+                    (e_ip, e_ingress_rate),
+                ],
+            );
 
             // Attempt to dequeue packets
             for _ in 0..egress_rate {
@@ -892,54 +815,15 @@ mod t {
         let e_ingress_rate = 30;
 
         for _ in 0..10000 {
-            for _ in 0..b_ingress_rate {
-                hwfq.enq(Pkt {
-                    ip_hdr: etherparse::Ipv4Header::new(
-                        100,
-                        64,
-                        etherparse::IpNumber::TCP,
-                        b_ip,
-                        dst_ip,
-                    )
-                    .unwrap(),
-                    dport: 0,
-                    fake_len: 100,
-                    buf: vec![],
-                })
-                .unwrap();
-            }
-            for _ in 0..d_ingress_rate {
-                hwfq.enq(Pkt {
-                    ip_hdr: etherparse::Ipv4Header::new(
-                        100,
-                        64,
-                        etherparse::IpNumber::TCP,
-                        d_ip,
-                        dst_ip,
-                    )
-                    .unwrap(),
-                    dport: 0,
-                    fake_len: 100,
-                    buf: vec![],
-                })
-                .unwrap();
-            }
-            for _ in 0..e_ingress_rate {
-                hwfq.enq(Pkt {
-                    ip_hdr: etherparse::Ipv4Header::new(
-                        100,
-                        64,
-                        etherparse::IpNumber::TCP,
-                        e_ip,
-                        dst_ip,
-                    )
-                    .unwrap(),
-                    dport: 0,
-                    fake_len: 100,
-                    buf: vec![],
-                })
-                .unwrap();
-            }
+            enq_rate(
+                &mut hwfq,
+                dst_ip,
+                [
+                    (b_ip, b_ingress_rate),
+                    (d_ip, d_ingress_rate),
+                    (e_ip, e_ingress_rate),
+                ],
+            );
 
             // Attempt to dequeue 3 packets.
             for _ in 0..3 {
