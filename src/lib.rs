@@ -184,3 +184,23 @@ fn get_ports(p: &etherparse::PacketHeaders<'_>) -> Result<(u16, u16), Report> {
         }
     }
 }
+
+#[cfg(test)]
+mod test_util {
+    pub fn make_pkt(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        sport: Option<u16>,
+        dport: Option<u16>,
+        len: usize,
+    ) -> crate::Pkt {
+        crate::Pkt {
+            ip_hdr: etherparse::Ipv4Header::new(100, 64, etherparse::IpNumber::TCP, src_ip, dst_ip)
+                .unwrap(),
+            sport: sport.unwrap_or(0),
+            dport: dport.unwrap_or(0),
+            buf: vec![],
+            fake_len: len,
+        }
+    }
+}

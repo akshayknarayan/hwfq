@@ -528,6 +528,7 @@ mod t {
                     dst_ip,
                 )
                 .unwrap(),
+                sport: 0,
                 dport: 0,
                 buf: vec![],
                 fake_len: 100,
@@ -542,6 +543,7 @@ mod t {
                     dst_ip,
                 )
                 .unwrap(),
+                sport: 0,
                 dport: 0,
                 buf: vec![],
                 fake_len: 100,
@@ -556,6 +558,7 @@ mod t {
                     dst_ip,
                 )
                 .unwrap(),
+                sport: 0,
                 dport: 0,
                 buf: vec![],
                 fake_len: 100,
@@ -603,34 +606,10 @@ mod t {
         assert_eq!(hwfq.tree.tot_qlen(), 0, "");
         // enqueue only d and e packets
         for _ in 0..60 {
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::TCP,
-                    d_ip,
-                    dst_ip,
-                )
-                .unwrap(),
-                dport: 0,
-                buf: vec![],
-                fake_len: 100,
-            })
-            .unwrap();
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::TCP,
-                    e_ip,
-                    dst_ip,
-                )
-                .unwrap(),
-                dport: 0,
-                buf: vec![],
-                fake_len: 100,
-            })
-            .unwrap();
+            hwfq.enq(crate::test_util::make_pkt(d_ip, dst_ip, None, None, 100))
+                .unwrap();
+            hwfq.enq(crate::test_util::make_pkt(e_ip, dst_ip, None, None, 100))
+                .unwrap();
         }
 
         assert_eq!(hwfq.tree.tot_qlen(), 120 * 100, "");
@@ -768,48 +747,12 @@ root:
         assert_eq!(hwfq.tree.tot_qlen(), 0, "");
         // enqueue a bunch of packets
         for _ in 0..100 {
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::TCP,
-                    src_ip,
-                    b_ip,
-                )
-                .unwrap(),
-                dport: 0,
-                buf: vec![],
-                fake_len: 100,
-            })
-            .unwrap();
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::TCP,
-                    src_ip,
-                    d_ip,
-                )
-                .unwrap(),
-                dport: 0,
-                buf: vec![],
-                fake_len: 100,
-            })
-            .unwrap();
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::TCP,
-                    src_ip,
-                    e_ip,
-                )
-                .unwrap(),
-                dport: 0,
-                buf: vec![],
-                fake_len: 100,
-            })
-            .unwrap();
+            hwfq.enq(crate::test_util::make_pkt(src_ip, b_ip, None, None, 100))
+                .unwrap();
+            hwfq.enq(crate::test_util::make_pkt(src_ip, d_ip, None, None, 100))
+                .unwrap();
+            hwfq.enq(crate::test_util::make_pkt(src_ip, e_ip, None, None, 100))
+                .unwrap();
         }
 
         assert_eq!(hwfq.tree.tot_qlen(), 300 * 100, "");

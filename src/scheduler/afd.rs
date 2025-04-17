@@ -195,8 +195,8 @@ impl Scheduler for ApproximateFairDropping {
 }
 
 #[cfg(test)]
-mod t {
-    use crate::{Pkt, Scheduler};
+pub(crate) mod t {
+    use crate::Scheduler;
 
     fn init() {
         use std::sync::Once;
@@ -224,6 +224,19 @@ mod t {
         )
     }
 
+    pub fn enq_rate<S: Scheduler>(
+        hwfq: &mut S,
+        dst_ip: [u8; 4],
+        flows: impl IntoIterator<Item = ([u8; 4], usize)>,
+    ) {
+        for (ip, ingress_rate) in flows {
+            for _ in 0..ingress_rate {
+                hwfq.enq(crate::test_util::make_pkt(ip, dst_ip, None, None, 100))
+                    .unwrap();
+            }
+        }
+    }
+
     #[test]
     fn afd_two_to_one() {
         init();
@@ -235,62 +248,7 @@ mod t {
 
         // Now enqueue a bunch but enqueue 2 b for every 1 c and 2 b for every 1 d.
         for _ in 0..10000 {
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::TCP,
-                    b_ip,
-                    dst_ip,
-                )
-                .unwrap(),
-                dport: 0,
-                fake_len: 100,
-                buf: vec![],
-            })
-            .unwrap();
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::TCP,
-                    b_ip,
-                    dst_ip,
-                )
-                .unwrap(),
-                dport: 0,
-                fake_len: 100,
-                buf: vec![],
-            })
-            .unwrap();
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::TCP,
-                    c_ip,
-                    dst_ip,
-                )
-                .unwrap(),
-                dport: 0,
-                fake_len: 100,
-                buf: vec![],
-            })
-            .unwrap();
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::TCP,
-                    d_ip,
-                    dst_ip,
-                )
-                .unwrap(),
-                dport: 0,
-                fake_len: 100,
-                buf: vec![],
-            })
-            .unwrap();
+            enq_rate(&mut hwfq, dst_ip, [(b_ip, 2), (c_ip, 1), (d_ip, 1)]);
 
             // Attempt to dequeue 3 packets.
             for _ in 0..3 {
@@ -336,36 +294,7 @@ mod t {
 
         // Now enqueue a bunch but enqueue 8 b for every 1 c.
         for _ in 0..10000 {
-            for _ in 0..8 {
-                hwfq.enq(Pkt {
-                    ip_hdr: etherparse::Ipv4Header::new(
-                        100,
-                        64,
-                        etherparse::IpNumber::TCP,
-                        b_ip,
-                        dst_ip,
-                    )
-                    .unwrap(),
-                    dport: 0,
-                    fake_len: 100,
-                    buf: vec![],
-                })
-                .unwrap();
-            }
-            hwfq.enq(Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::TCP,
-                    c_ip,
-                    dst_ip,
-                )
-                .unwrap(),
-                dport: 0,
-                fake_len: 100,
-                buf: vec![],
-            })
-            .unwrap();
+            enq_rate(&mut hwfq, dst_ip, [(b_ip, 8), (c_ip, 1)]);
 
             // Attempt to dequeue 3 packets.
             for _ in 0..3 {

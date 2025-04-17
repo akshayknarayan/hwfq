@@ -453,21 +453,16 @@ mod t {
         let src_ip = [42, 2, 0, 0];
         let d_ip = [42, 1, 2, 6];
 
+        let sports = [16385, 18258];
         let dports = [4242, 4243];
         for i in 0..600 {
-            s.enq(crate::Pkt {
-                ip_hdr: etherparse::Ipv4Header::new(
-                    100,
-                    64,
-                    etherparse::IpNumber::TCP,
-                    src_ip,
-                    d_ip,
-                )
-                .unwrap(),
-                dport: dports[i % dports.len()],
-                buf: vec![],
-                fake_len: 1500,
-            })
+            s.enq(crate::test_util::make_pkt(
+                src_ip,
+                d_ip,
+                Some(sports[i % sports.len()]),
+                Some(dports[i % dports.len()]),
+                1500,
+            ))
             .expect("enqueue dummy packet");
         }
 
