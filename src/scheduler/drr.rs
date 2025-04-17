@@ -8,21 +8,23 @@ const MAX_QUEUES: usize = 32;
 
 const FNV1_64_INIT: u64 = 0xcbf29ce484222325u64;
 const FNV_64_PRIME: u64 = 0x100000001b3u64;
-fn fnv_ips(src: [u8; 4], dst: [u8; 4], queues: u64) -> u8 {
+fn fnv_ips(ip_hdr: &etherparse::Ipv4Header) -> u8 {
     let mut hash = FNV1_64_INIT;
-    for b in src.iter().chain(dst.iter()) {
+    for b in ip_hdr.source.iter().chain(ip_hdr.destination.iter()) {
         hash ^= *b as u64;
         hash = u64::wrapping_mul(hash, FNV_64_PRIME);
     }
 
-    (hash % queues) as u8
+    (hash % (MAX_QUEUES as u64)) as u8
 }
 
-fn fnv_ports(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, queues: u64) -> u8 {
+fn fnv_5tuple(ip_hdr: &etherparse::Ipv4Header, sport: u16, dport: u16) -> u8 {
     let mut hash = FNV1_64_INIT;
-    for b in src
+    for b in ip_hdr
+        .source
         .iter()
-        .chain(dst.iter())
+        .chain(ip_hdr.destination.iter())
+        .chain(std::iter::once(&ip_hdr.protocol.0))
         .chain(sport.to_be_bytes().iter())
         .chain(dport.to_be_bytes().iter())
     {
@@ -30,11 +32,11 @@ fn fnv_ports(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, queues: u64) ->
         hash = u64::wrapping_mul(hash, FNV_64_PRIME);
     }
 
-    (hash % queues) as u8
+    (hash % (MAX_QUEUES as u64)) as u8
 }
 
 #[derive(Default)]
-pub struct Drr<const HASH_PORTS: bool> {
+pub struct Drr<const HASH_5TUPLE: bool> {
     limit_bytes: usize,
     queues: [VecDeque<Pkt>; MAX_QUEUES],
     curr_qsizes: [usize; MAX_QUEUES],
@@ -47,7 +49,7 @@ pub struct Drr<const HASH_PORTS: bool> {
     deq_curr_qid: usize,
 }
 
-impl<const HASH_PORTS: bool> Drr<HASH_PORTS> {
+impl<const HASH_5TUPLE: bool> Drr<HASH_5TUPLE> {
     pub fn new(limit_bytes: usize) -> Self {
         Self {
             limit_bytes,
@@ -62,7 +64,7 @@ impl<const HASH_PORTS: bool> Drr<HASH_PORTS> {
     }
 }
 
-impl<const HASH_PORTS: bool> Scheduler for Drr<HASH_PORTS> {
+impl<const HASH_5TUPLE: bool> Scheduler for Drr<HASH_5TUPLE> {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         let curr_tot_qsize: usize = self.curr_qsizes.iter().sum();
         ensure!(
@@ -71,16 +73,10 @@ impl<const HASH_PORTS: bool> Scheduler for Drr<HASH_PORTS> {
         );
 
         // hash p into a queue
-        let flow_id = if HASH_PORTS {
-            fnv_ports(
-                p.ip_hdr.source,
-                p.ip_hdr.destination,
-                p.sport,
-                p.dport,
-                MAX_QUEUES as u64,
-            )
+        let flow_id = if HASH_5TUPLE {
+            fnv_5tuple(&p.ip_hdr, p.sport, p.dport)
         } else {
-            fnv_ips(p.ip_hdr.source, p.ip_hdr.destination, MAX_QUEUES as u64)
+            fnv_ips(&p.ip_hdr)
         };
 
         match self.queue_map.entry(flow_id) {
