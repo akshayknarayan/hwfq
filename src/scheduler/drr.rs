@@ -1,7 +1,9 @@
 use super::Scheduler;
 use crate::{Error, Pkt};
 use color_eyre::eyre::{ensure, Report};
+use std::time::Duration;
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
+use tracing::debug;
 
 // Define constant max number of queues.
 const MAX_QUEUES: usize = 32;
@@ -34,7 +36,7 @@ fn fnv_ports(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, queues: u64) ->
 }
 
 #[derive(Default)]
-pub struct Drr<const HASH_PORTS: bool> {
+pub struct Drr<const HASH_PORTS: bool, L: std::io::Write>{
     limit_bytes: usize,
     queues: [VecDeque<Pkt>; MAX_QUEUES],
     curr_qsizes: [usize; MAX_QUEUES],
@@ -45,12 +47,14 @@ pub struct Drr<const HASH_PORTS: bool> {
     num_queues: usize,
 
     deq_curr_qid: usize,
+    logger: Option<csv::Writer<L>>
 }
 
-impl<const HASH_PORTS: bool> Drr<HASH_PORTS> {
-    pub fn new(limit_bytes: usize) -> Self {
+impl<const HASH_PORTS: bool, W: std::io::Write>  Drr<HASH_PORTS , W> {
+    pub fn new(limit_bytes: usize) ->  Result<Self, Report> {
+        Ok(
         Self {
-            limit_bytes,
+            limit_bytes:limit_bytes,
             queues: Default::default(),
             curr_qsizes: [0usize; MAX_QUEUES],
             deficits: [0usize; MAX_QUEUES],
@@ -58,11 +62,12 @@ impl<const HASH_PORTS: bool> Drr<HASH_PORTS> {
             queue_map: HashMap::new(),
             num_queues: 0,
             deq_curr_qid: 0,
-        }
+            logger: None,
+        })
     }
 }
 
-impl<const HASH_PORTS: bool> Scheduler for Drr<HASH_PORTS> {
+impl<const HASH_PORTS: bool, L: std::io::Write> Scheduler for Drr<HASH_PORTS, L> {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         let curr_tot_qsize: usize = self.curr_qsizes.iter().sum();
         ensure!(
@@ -155,4 +160,130 @@ impl<const HASH_PORTS: bool> Scheduler for Drr<HASH_PORTS> {
         self.limit_bytes = bytes;
         Ok(())
     }
+    fn dbg(&mut self, _epoch_dur: Duration) {
+        self.log()
+        
+    }
+
+    
 }
+
+
+impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
+    pub fn with_logger<const HASH_TWO:bool, W: std::io::Write>(self, w: W) -> Drr<HASH_TWO,W> {
+        self.maybe_with_logger(Some(w))
+    }
+
+    pub fn maybe_with_logger<const HASH_TWO:bool , W: std::io::Write>(self, w: Option<W>) -> Drr<HASH_TWO, W> {
+        Drr {
+            limit_bytes: self.limit_bytes,
+            queues: self.queues,
+            curr_qsizes: self.curr_qsizes,
+            deficits: self.deficits,
+            quanta: self.quanta,
+            queue_map: self.queue_map,
+            num_queues: self.num_queues,
+            deq_curr_qid: self.deq_curr_qid,
+
+            logger: w.map(|x| csv::Writer::from_writer(x)),
+        }
+    }
+        fn log(&mut self){
+        if let Some(log) = self.logger.as_mut() {
+            #[derive(serde::Serialize)]
+            struct Record {
+                unix_time_ms: u128,
+                curr_qsizes: [usize; MAX_QUEUES],
+                queue_map: HashMap<u8, usize>,
+            }
+
+            if let Err(err) = log.serialize(Record {
+                unix_time_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+                
+                curr_qsizes: self.curr_qsizes,
+                queue_map: self.queue_map.clone(),
+            }) {
+                debug!(?err, "write to logger failed");
+            }
+        }
+        debug!(?self.curr_qsizes, ?self.queue_map, "rate counter log");
+
+
+    }
+}
+
+
+#[cfg(feature = "drr-argparse")]
+pub mod parse_args {
+    use std::{path::PathBuf, str::FromStr};
+
+    use clap::Parser;
+    use color_eyre::eyre::{eyre, Report};
+    use super::Drr;
+    #[derive(Parser, Debug)]
+    #[command(name = "hwfq")]
+    pub struct Opt {
+        #[arg(short, long)]
+        pub limit_bytes: usize,
+
+        #[arg(long)]
+        pub log_file: Option<PathBuf>,
+
+        
+    }
+
+    impl <const HASH_PORTS: bool>  FromStr for Drr<HASH_PORTS, std::fs::File> {
+        type Err = Report;
+
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            let sp = s.split_whitespace();
+            let dummy = std::iter::once("tmp");
+            let opt = Opt::try_parse_from(dummy.chain(sp))?;
+            opt.try_into()
+        }
+    }
+
+    impl <const HASH_PORTS: bool> TryFrom<Opt> for Drr<HASH_PORTS,std::fs::File > {
+        type Error = Report;
+        fn try_from(o: Opt) -> Result<Self, Self::Error> {
+            Ok(Drr::< HASH_PORTS, std::fs::File>::new(
+                o.limit_bytes,
+            )?
+            .maybe_with_logger(o.log_file.map(std::fs::File::create).transpose()?))
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct ClassOpt {
+        dport: u16,
+        rate: usize,
+    }
+
+    impl FromStr for ClassOpt {
+        type Err = Report;
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            let mut sp = s.split('=');
+            let dport = sp
+                .next()
+                .ok_or_else(|| eyre!("dport=rate format for class"))?
+                .parse()?;
+            let rate = sp
+                .next()
+                .ok_or_else(|| eyre!("dport=rate format for class"))?
+                .parse()?;
+            Ok(ClassOpt { dport, rate })
+        }
+    }
+
+   
+
+    
+}
+
+
+
+
+
