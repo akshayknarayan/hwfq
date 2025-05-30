@@ -11,7 +11,7 @@ hdwrr = ["yaml-rust"]
 htb = ["csv", "serde"]
 drr = ["csv", "serde"]
 htb-argparse = ["htb", "clap"]
-drr-argparse=["drr", "clap"]
+drr-argparse=["clap"]
 hwfq-audit = []
 
 [dependencies]
