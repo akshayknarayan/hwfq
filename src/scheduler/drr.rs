@@ -227,14 +227,12 @@ pub mod parse_args {
     #[command(name = "hwfq")]
     pub struct Opt {
         #[arg(short, long)]
-        pub limit_bytes: usize,
+        pub limit-bytes: usize,
 
         #[arg(long)]
-        pub log_file: Option<PathBuf>,
-
-        
+        pub log-file: Option<PathBuf>,
     }
-
+    
     impl <const HASH_PORTS: bool>  FromStr for Drr<HASH_PORTS, std::fs::File> {
         type Err = Report;
 
@@ -243,7 +241,9 @@ pub mod parse_args {
             let dummy = std::iter::once("tmp");
             let opt = Opt::try_parse_from(dummy.chain(sp))?;
             opt.try_into()
+
         }
+       
     }
 
     impl <const HASH_PORTS: bool> TryFrom<Opt> for Drr<HASH_PORTS,std::fs::File > {
