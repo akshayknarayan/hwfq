@@ -5,6 +5,8 @@ use std::time::Duration;
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
 use tracing::debug;
 
+
+
 // Define constant max number of queues.
 const MAX_QUEUES: usize = 32;
 
@@ -185,42 +187,82 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
             num_queues: self.num_queues,
             deq_curr_qid: self.deq_curr_qid,
 
-            logger: w.map(|x| csv::Writer::from_writer(x)),
+            logger: w.map(|x| csv::WriterBuilder::new().has_headers(false).from_writer(x)),
         }
         
     }
     pub fn log(&mut self){
         
         if let Some(log) = self.logger.as_mut() {
-
+           /*  struct Flow <'a>{
+                protocol: u8,
+                source_ip: &'a str,
+                dest_ip: &'a str,
+                sport: u16,
+                dport: u16
+            }
+            impl Serialize for Flow<'a> {
+                fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                where
+                    S: Serializer,
+                {
+                    // 3 is the number of fields in the struct.
+                    let mut state = serializer.serialize_struct("Flow", 5)?;
+                    state.serialize_field("protocol", &self.protocol)?;
+                    state.serialize_field("source_ip", &self.source_ip)?;
+                    state.serialize_field("dest_ip", &self.dest_ip)?;
+                    state.serialize_field("sport", &self.sport)?;
+                    state.serialize_field("dport", &self.dport)?;
+                    state.end()
+                }
+            }*/
+                        
             #[derive(serde::Serialize)]
-            struct Record {
+            struct Record{
                 unix_time_ms: u128,
                 queue_id: usize,
-                flow_info: Vec<(u8, String, String, u16, u16)>,
+                flows_protocols: Vec<u8>,
+                flows_source_ip: Vec<String>,
+                flows_dest_ip: Vec<String>,
+                flows_sport: Vec<u16>,
+                flows_dport: Vec<u16>,
                 queue_size: usize,
             }
 
             for i in 0..MAX_QUEUES{ // first fill out the vector
-
-                let mut flows:Vec<(u8, String, String, u16, u16)> = Vec::new();
-                if self.curr_qsizes[i] > 0{
+                let mut protocols:Vec<u8> = Vec::new();
+                let mut source_ips:Vec<String> = Vec::new();
+                let mut dest_ips:Vec<String> = Vec::new();
+                let mut source_ports:Vec<u16> = Vec::new();
+                let mut dest_ports:Vec<u16> = Vec::new();
+                if self.curr_qsizes[i] > 0 {
                     for flow in &self.queues[i.clone()]{
-                        let protocol = flow.ip_hdr.protocol.0;
-                        let source_ip:String = format!("{}.{}.{}.{}", flow.ip_hdr.source[0], flow.ip_hdr.source[1], flow.ip_hdr.source[2], flow.ip_hdr.source[3]); 
-                        let dest_ip:String = format!("{}.{}.{}.{}", flow.ip_hdr.destination[0], flow.ip_hdr.destination[1], flow.ip_hdr.destination[2], flow.ip_hdr.destination[3]); 
-                        flows.push((protocol, source_ip, dest_ip, flow.sport, flow.dport));
+                        protocols.push(flow.ip_hdr.protocol.0);
+                        /*let source_ip = format!("{}.{}.{}.{}", flow.ip_hdr.source[0], flow.ip_hdr.source[1], flow.ip_hdr.source[2], flow.ip_hdr.source[3]);
+                        source_ips.push(source_ip); 
+                        let dest_ip = format!("{}.{}.{}.{}", flow.ip_hdr.destination[0], flow.ip_hdr.destination[1], flow.ip_hdr.destination[2], flow.ip_hdr.destination[3]);
+                        dest_ips.push(dest_ip);*/
+                        source_ports.push(flow.sport);
+                        dest_ports.push(flow.dport);
                     }
-                }else{
-                    flows.push((0, format!("N/A"), format!("N/A"), 0, 0));
+                } else {
+                    protocols.push(1);
+                   // source_ips.push(format!("N/A")); 
+                    //dest_ips.push(format!("N/A"));
+                    source_ports.push(1);
+                    dest_ports.push(1);
                 }
                 if let Err(err) = log.serialize(Record {
                     unix_time_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_millis(),
-                    queue_id: i,
-                    flow_info:flows,
+                    queue_id:i,
+                    flows_protocols: protocols,
+                    flows_source_ip: source_ips,
+                    flows_dest_ip: dest_ips,
+                    flows_sport: source_ports,
+                    flows_dport: dest_ports,
                     queue_size:self.curr_qsizes[i]
                 }) {
                     debug!(?err, "write to logger failed");
@@ -240,7 +282,7 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
 pub mod parse_args {
     use std::{path::PathBuf, str::FromStr};
     use clap::Parser;
-    use color_eyre::eyre::{eyre, Report};
+    use color_eyre::eyre::Report;
     use super::Drr;
     #[derive(Parser, Debug)]
     #[command(name = "drr")]
