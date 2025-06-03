@@ -258,12 +258,13 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
                         .unwrap()
                         .as_millis(),
                     queue_id:i,
+                    queue_size:self.curr_qsizes[i],
                     flows_protocols: protocols,
                     flows_source_ip: source_ips,
                     flows_dest_ip: dest_ips,
                     flows_sport: source_ports,
                     flows_dport: dest_ports,
-                    queue_size:self.curr_qsizes[i]
+                    
                 }) {
                     debug!(?err, "write to logger failed");
                 }
