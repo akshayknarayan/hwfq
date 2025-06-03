@@ -221,12 +221,13 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
             struct Record{
                 unix_time_ms: u128,
                 queue_id: usize,
+                queue_size: usize,
                 flows_protocols: Vec<u8>,
                 flows_source_ip: Vec<String>,
                 flows_dest_ip: Vec<String>,
                 flows_sport: Vec<u16>,
                 flows_dport: Vec<u16>,
-                queue_size: usize,
+                
             }
 
             for i in 0..MAX_QUEUES{ // first fill out the vector
@@ -236,38 +237,34 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
                 let mut source_ports:Vec<u16> = Vec::new();
                 let mut dest_ports:Vec<u16> = Vec::new();
                 if self.curr_qsizes[i] > 0 {
-                    for flow in &self.queues[i.clone()]{
+                    for flow in self.queues[i].clone(){
                         protocols.push(flow.ip_hdr.protocol.0);
-                        /*let source_ip = format!("{}.{}.{}.{}", flow.ip_hdr.source[0], flow.ip_hdr.source[1], flow.ip_hdr.source[2], flow.ip_hdr.source[3]);
+                        let source_ip = format!("{}.{}.{}.{}", flow.ip_hdr.source[0], flow.ip_hdr.source[1], flow.ip_hdr.source[2], flow.ip_hdr.source[3]);
                         source_ips.push(source_ip); 
                         let dest_ip = format!("{}.{}.{}.{}", flow.ip_hdr.destination[0], flow.ip_hdr.destination[1], flow.ip_hdr.destination[2], flow.ip_hdr.destination[3]);
-                        dest_ips.push(dest_ip);*/
+                        dest_ips.push(dest_ip);
                         source_ports.push(flow.sport);
                         dest_ports.push(flow.dport);
                     }
-                } else {
-                    protocols.push(1);
-                   // source_ips.push(format!("N/A")); 
-                    //dest_ips.push(format!("N/A"));
-                    source_ports.push(1);
-                    dest_ports.push(1);
-                }
-                if let Err(err) = log.serialize(Record {
-                    unix_time_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis(),
-                    queue_id:i,
-                    queue_size:self.curr_qsizes[i],
-                    flows_protocols: protocols,
-                    flows_source_ip: source_ips,
-                    flows_dest_ip: dest_ips,
-                    flows_sport: source_ports,
-                    flows_dport: dest_ports,
-                    
-                }) {
-                    debug!(?err, "write to logger failed");
-                }
+                    if let Err(err) = log.serialize(Record {
+                        unix_time_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis(),
+                        queue_id:i,
+                        queue_size:self.curr_qsizes[i],
+                        flows_protocols: protocols,
+                        flows_source_ip: source_ips,
+                        flows_dest_ip: dest_ips,
+                        flows_sport: source_ports,
+                        flows_dport: dest_ports,
+                        
+                    }) {
+                        debug!(?err, "write to logger failed");
+                    }
+                } 
+                
+                
 
             }
             
