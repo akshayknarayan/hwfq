@@ -5,13 +5,14 @@ edition = "2021"
 
 [features]
 datapath = ["tun-tap", "libc", "socket2", "pnet", "flume"]
-bin = ["datapath", "clap", "tracing-subscriber", "htb-argparse"]
+bin = ["datapath", "clap", "tracing-subscriber", "htb-argparse", "drr-argparse"]
 afd = ["rand", "yaml-rust"]
 hdwrr = ["yaml-rust"]
-htb = ["csv", "serde"]
 drr = ["csv", "serde"]
+drr-argparse=["clap", "drr", "clap"]
+drr-logging=["clap", "drr", "clap"]
+htb = ["csv", "serde"]
 htb-argparse = ["htb", "clap"]
-drr-argparse=["clap"]
 hwfq-audit = []
 
 [dependencies]
@@ -40,7 +41,7 @@ required-features = ["bin", "afd", "hdwrr"]
 
 [[bin]]
 name = "policer"
-required-features = ["htb", "bin"]
+required-features = ["drr", "htb", "bin"]
 
 [[bin]]
 name = "uds_out"
