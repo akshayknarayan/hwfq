@@ -1,11 +1,9 @@
 use super::Scheduler;
 use crate::{Error, Pkt};
 use color_eyre::eyre::{ensure, Report};
-use std::time::Duration;
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
+use std::time::Duration;
 use tracing::debug;
-
-
 
 // Define constant max number of queues.
 const MAX_QUEUES: usize = 32;
@@ -38,7 +36,7 @@ fn fnv_ports(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, queues: u64) ->
 }
 
 #[derive(Default)]
-pub struct Drr<const HASH_PORTS: bool, L: std::io::Write>{
+pub struct Drr<const HASH_PORTS: bool, L: std::io::Write> {
     limit_bytes: usize,
     queues: [VecDeque<Pkt>; MAX_QUEUES],
     curr_qsizes: [usize; MAX_QUEUES],
@@ -52,11 +50,10 @@ pub struct Drr<const HASH_PORTS: bool, L: std::io::Write>{
     logger: Option<csv::Writer<L>>,
 }
 
-impl<const HASH_PORTS: bool, W: std::io::Write>  Drr<HASH_PORTS , W> {
-    pub fn new(limit_bytes: usize) ->  Result<Self, Report> {
-        Ok(
-        Self {
-            limit_bytes:limit_bytes,
+impl<const HASH_PORTS: bool, W: std::io::Write> Drr<HASH_PORTS, W> {
+    pub fn new(limit_bytes: usize) -> Result<Self, Report> {
+        Ok(Self {
+            limit_bytes: limit_bytes,
             queues: Default::default(),
             curr_qsizes: [0usize; MAX_QUEUES],
             deficits: [0usize; MAX_QUEUES],
@@ -164,15 +161,11 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Scheduler for Drr<HASH_PORTS, L>
     }
     fn dbg(&mut self, _epoch_dur: Duration) {
         self.log()
-        
     }
-
-    
 }
 
-
 impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
-    pub fn with_logger(self, w : L) -> Drr<HASH_PORTS,L> {
+    pub fn with_logger(self, w: L) -> Drr<HASH_PORTS, L> {
         self.maybe_with_logger(Some(w))
     }
 
@@ -189,99 +182,54 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
 
             logger: w.map(|x| csv::WriterBuilder::new().has_headers(false).from_writer(x)),
         }
-        
     }
-    pub fn log(&mut self){
-        
+    pub fn log(&mut self) {
         if let Some(log) = self.logger.as_mut() {
-           /*  struct Flow <'a>{
-                protocol: u8,
-                source_ip: &'a str,
-                dest_ip: &'a str,
-                sport: u16,
-                dport: u16
-            }
-            impl Serialize for Flow<'a> {
-                fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-                where
-                    S: Serializer,
-                {
-                    // 3 is the number of fields in the struct.
-                    let mut state = serializer.serialize_struct("Flow", 5)?;
-                    state.serialize_field("protocol", &self.protocol)?;
-                    state.serialize_field("source_ip", &self.source_ip)?;
-                    state.serialize_field("dest_ip", &self.dest_ip)?;
-                    state.serialize_field("sport", &self.sport)?;
-                    state.serialize_field("dport", &self.dport)?;
-                    state.end()
-                }
-            }*/
-                        
             #[derive(serde::Serialize)]
-            struct Record{
+            struct Record {
                 unix_time_ms: u128,
                 queue_id: usize,
                 queue_size: usize,
-                flows_protocols: Vec<u8>,
-                flows_source_ip: Vec<String>,
-                flows_dest_ip: Vec<String>,
-                flows_sport: Vec<u16>,
-                flows_dport: Vec<u16>,
-                
+                flows: Vec<String>,
             }
 
-            for i in 0..MAX_QUEUES{ // first fill out the vector
-                let mut protocols:Vec<u8> = Vec::new();
-                let mut source_ips:Vec<String> = Vec::new();
-                let mut dest_ips:Vec<String> = Vec::new();
-                let mut source_ports:Vec<u16> = Vec::new();
-                let mut dest_ports:Vec<u16> = Vec::new();
+            for i in 0..MAX_QUEUES {
+                // first fill out the vector
+                let mut flows: Vec<String> = Vec::new();
                 if self.curr_qsizes[i] > 0 {
-                    for flow in self.queues[i].clone(){
-                        protocols.push(flow.ip_hdr.protocol.0);
-                        let source_ip = format!("{}.{}.{}.{}", flow.ip_hdr.source[0], flow.ip_hdr.source[1], flow.ip_hdr.source[2], flow.ip_hdr.source[3]);
-                        source_ips.push(source_ip); 
-                        let dest_ip = format!("{}.{}.{}.{}", flow.ip_hdr.destination[0], flow.ip_hdr.destination[1], flow.ip_hdr.destination[2], flow.ip_hdr.destination[3]);
-                        dest_ips.push(dest_ip);
-                        source_ports.push(flow.sport);
-                        dest_ports.push(flow.dport);
+                    for flow in self.queues[i].clone() {
+                        if let Some(prot) = flow.ip_hdr.protocol.keyword_str() {
+                            let output: String = format!("({}:", prot) + 
+                            format!("{}.{}.{}.{} ->", flow.ip_hdr.source[0], flow.ip_hdr.source[1], flow.ip_hdr.source[2], flow.ip_hdr.source[3]).as_mut_str() +  //source ip
+                            format!("{}.{}.{}.{}, ", flow.ip_hdr.destination[0], flow.ip_hdr.destination[1], flow.ip_hdr.destination[2], flow.ip_hdr.destination[3]).as_mut_str() + //dest ip
+                            format!("{} -> {})\n", flow.sport, flow.dport).as_mut_str();
+                            flows.push(output);
+                        }
                     }
                     if let Err(err) = log.serialize(Record {
                         unix_time_ms: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_millis(),
-                        queue_id:i,
-                        queue_size:self.curr_qsizes[i],
-                        flows_protocols: protocols,
-                        flows_source_ip: source_ips,
-                        flows_dest_ip: dest_ips,
-                        flows_sport: source_ports,
-                        flows_dport: dest_ports,
-                        
+                        queue_id: i,
+                        queue_size: self.curr_qsizes[i],
+                        flows: flows,
                     }) {
                         debug!(?err, "write to logger failed");
                     }
-                } 
-                
-                
-
+                }
             }
-            
         }
         debug!(?self.curr_qsizes, ?self.queue_map, "rate counter log");
-
-
     }
 }
 
-
 #[cfg(feature = "drr-argparse")]
 pub mod parse_args {
-    use std::{path::PathBuf, str::FromStr};
+    use super::Drr;
     use clap::Parser;
     use color_eyre::eyre::Report;
-    use super::Drr;
+    use std::{path::PathBuf, str::FromStr};
     #[derive(Parser, Debug)]
     #[command(name = "drr")]
     pub struct Opt {
@@ -291,8 +239,8 @@ pub mod parse_args {
         #[arg(long)]
         pub log_file: Option<PathBuf>,
     }
-    
-    impl <const HASH_PORTS: bool>  FromStr for Drr<HASH_PORTS, std::fs::File> {
+
+    impl<const HASH_PORTS: bool> FromStr for Drr<HASH_PORTS, std::fs::File> {
         type Err = Report;
 
         fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -300,28 +248,14 @@ pub mod parse_args {
             let dummy = std::iter::once("tmp");
             let opt = Opt::try_parse_from(dummy.chain(sp))?;
             opt.try_into()
-
         }
-       
     }
 
-    impl <const HASH_PORTS: bool> TryFrom<Opt> for Drr<HASH_PORTS,std::fs::File > {
+    impl<const HASH_PORTS: bool> TryFrom<Opt> for Drr<HASH_PORTS, std::fs::File> {
         type Error = Report;
         fn try_from(o: Opt) -> Result<Self, Self::Error> {
-            Ok(Drr::< HASH_PORTS, std::fs::File>::new(
-                o.limit_bytes,
-            )?
-            .maybe_with_logger(o.log_file.map(std::fs::File::create).transpose()?))
+            Ok(Drr::<HASH_PORTS, std::fs::File>::new(o.limit_bytes)?
+                .maybe_with_logger(o.log_file.map(std::fs::File::create).transpose()?))
         }
     }
-
-    
-   
-
-    
 }
-
-
-
-
-
