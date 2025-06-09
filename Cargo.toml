@@ -31,6 +31,7 @@ flume = { version = "0.11", optional = true }
 rand = { version = "0.8", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 tracing-subscriber  = { version = "0.3", optional = true }
+log = "0.4.27"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
