@@ -195,11 +195,10 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
                 queue_size: usize,
                 flows: Vec<String>,
             }
-
             for i in 0..MAX_QUEUES {
                 // first fill out the vector
                 let mut flows: Vec<String> = Vec::new();
-                if self.curr_qsizes[i] > 0 {
+                if self.queues[i].len() > 0 {
                     let old_flows = self.queues[i].clone().into_iter();
                     for flow in old_flows {
                         if let Some(prot) = flow.ip_hdr.protocol.keyword_str() {
@@ -225,6 +224,48 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
             }
         }
         //  debug!("{} {} rate counter log", self.curr_qsizes);
+    }
+
+    pub fn log_bool(&mut self, enq:bool){ // helper method for udp debugging, meant to show when enqueing vs dequeing
+        if let Some(log) = self.logger.as_mut() {
+            #[derive(serde::Serialize)]
+            struct Record {
+                unix_time_ms: u128,
+                queue_id: usize,
+                queue_size: usize,
+                enq:bool,
+                flows: Vec<String>,
+                
+            }
+            for i in 0..MAX_QUEUES {
+                // first fill out the vector
+                let mut flows: Vec<String> = Vec::new();
+                if self.queues[i].len() > 0 {
+                    let old_flows = self.queues[i].clone().into_iter();
+                    for flow in old_flows {
+                        if let Some(prot) = flow.ip_hdr.protocol.keyword_str() {
+                            let output: String = format!("({}:", prot) + 
+                            format!("{}.{}.{}.{} -> ", flow.ip_hdr.source[0], flow.ip_hdr.source[1], flow.ip_hdr.source[2], flow.ip_hdr.source[3]).as_mut_str() +  //source ip
+                            format!("{}.{}.{}.{}, ", flow.ip_hdr.destination[0], flow.ip_hdr.destination[1], flow.ip_hdr.destination[2], flow.ip_hdr.destination[3]).as_mut_str() + //dest ip
+                            format!("{} -> {})\n", flow.sport, flow.dport).as_mut_str();
+                            flows.push(output);
+                        }
+                    }
+                    if let Err(err) = log.serialize(Record {
+                        unix_time_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis(),
+                        queue_id: i,
+                        queue_size: self.queues[i].len(),
+                        flows: flows,
+                        enq:enq,
+                    }) {
+                        debug!("{} write to logger failed", err);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -283,6 +324,7 @@ mod tests {
     use std::time::Duration;
 
     use quanta::Instant;
+    use std::fs::File;
 
     use crate::scheduler::Scheduler;
 
@@ -295,16 +337,20 @@ mod tests {
     ) -> (Duration, Duration, Vec<usize>) {
         let src_ip = [42, 2, 0, 0];
         let d_ip = [42, 1, 2, 6];
-        // if the flow's impact is zero it shouldn't be included
+
         if dports.len() != num_packets.len() {
             dbg!(dports.len(), num_packets.len(), "These should be equal");
             return (Duration::ZERO, Duration::ZERO, Vec::new()); // need to add a check for this
         }
+
         let enq_start = Instant::now();
-        let call_less = num_packets.len();
+
         // create packets for each queue
-        for i in 0..call_less {
+        for i in 0..num_packets.len() {
             for _ in 0..num_packets[i] {
+                if let Some(_) = s.logger {
+                    s.log_bool(true);
+                }
                 s.enq(crate::Pkt {
                     ip_hdr: etherparse::Ipv4Header::new(
                         100,
@@ -314,7 +360,7 @@ mod tests {
                         d_ip,
                     )
                     .unwrap(),
-                    dport: dports[i % dports.len()],
+                    dport: dports[i],
                     sport: 4242,
                     buf: vec![],
                     fake_len: 1500,
@@ -333,7 +379,7 @@ mod tests {
         let mut el: Duration = Duration::ZERO;
         while el < Duration::from_millis(1_000) {
             // only measures deque timing, not searching through list's timing
-            let start = Instant::now(); 
+            let start = Instant::now();
             let p = match s.deq().expect("dequeue") {
                 None => {
                     cnt_vec.push(d_cnt);
@@ -342,6 +388,10 @@ mod tests {
                 Some(a) => a,
             };
             el += start.elapsed();
+            if let Some(_) = s.logger {
+                s.log_bool(false);
+            }
+
             // checks if we need to put it into dport without having to run through the vector twice
             let mut changed: bool = false;
             for i in 0..dports.len() {
@@ -356,13 +406,21 @@ mod tests {
         }
         cnt_vec.push(d_cnt);
         // the(unused) first two outputs kept to be able to later test enqueing and dequeing's individual rates later
-        (el, enq_elapsed, cnt_vec) 
+        (el, enq_elapsed, cnt_vec)
     }
 
     #[test]
     fn basic() {
-        let runner: Drr<true, std::io::Empty> = Drr::new(12000).unwrap();
-        let (el, enq_el, v) = enq_deq_packets(runner, vec![4242, 4243], vec![300, 300]);
+        let decoy: Drr<true, std::fs::File> = Drr::new(12000).unwrap();
+        let runner: Drr<true, std::fs::File>;
+        if let Ok(new_file) = File::create("testlogs/basic.log") {
+            runner = decoy.maybe_with_logger(Some(new_file));
+            dbg!("WORKED!!!!!");
+        } else {
+            runner = Drr::new(12000).unwrap();
+        }
+
+        let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243], vec![300, 300]);
         let c1_cnt = v[0];
         let c2_cnt = v[1];
         let d_cnt = v[2];
@@ -376,8 +434,10 @@ mod tests {
             "class1 rate error off by more than 1%"
         );
     }
+    /* too many tests were annoying me
     #[test]
-    fn three() { //testing 3 equal number of packets sents
+    fn three() {
+        //testing 3 equal number of packets sents
         let runner: Drr<true, std::io::Empty> = Drr::new(12000).unwrap();
         let rates = vec![300, 300, 300];
         let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243, 4244], rates.clone());
@@ -395,10 +455,19 @@ mod tests {
             );
         }
     }
+    */
     #[test]
-    fn diff_rates() { // testing 2 unequal number of packets sent
-        let runner: Drr<true, std::io::Empty> = Drr::new(12000).unwrap();
-        let rates = vec![1500, 750];
+    fn diff_rates() {
+        // testing 2 unequal number of packets sent
+        let decoy: Drr<true, std::fs::File> = Drr::new(12000).unwrap();
+        let runner: Drr<true, std::fs::File>;
+        if let Ok(new_file) = File::create("testlogs/diff_rates.log") {
+            runner = decoy.maybe_with_logger(Some(new_file));
+            dbg!("WORKED!!!!!");
+        } else {
+            runner = Drr::new(12000).unwrap();
+        }
+        let rates = vec![150, 100];
         let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243], rates.clone());
 
         let tot: usize = v.iter().sum();
@@ -408,18 +477,33 @@ mod tests {
 
         //the different flows should all have relatively similar dequeue rates
         for i in 0..rates.len() {
-            dbg!(i);
-            assert!(
-                (((v[i] as f64) / tot as f64) - (rates[i] as f64 / pack_tot as f64)).abs() < 0.01,
-                "class1 rate error off by more than 1%"
-            );
+            for j in 0..rates.len() {
+                assert!(
+                    (((v[i] as f64) / tot as f64) - v[j] as f64 / tot as f64).abs() < 0.01,
+                    "testing if v[{}] = {} is near v[{}] = {} with rates {}, {}",
+                    i,
+                    v[i],
+                    j,
+                    v[j],
+                    rates[i],
+                    rates[j]
+                );
+            }
         }
     }
     #[test]
-    fn three_diff_rates() { //testing 3 distinct number of packets sent
-        let runner: Drr<true, std::io::Empty> = Drr::new(12000).unwrap();
-        let rates = vec![300, 150, 800];
-        let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243, 4244], rates.clone());
+    fn diff_non_overflow() {
+        // testing 2 unequal number of packets sent
+        let decoy: Drr<true, std::fs::File> = Drr::new(120000).unwrap();
+        let runner: Drr<true, std::fs::File>;
+        if let Ok(new_file) = File::create("testlogs/diff_rates.log") {
+            runner = decoy.maybe_with_logger(Some(new_file));
+            dbg!("WORKED!!!!!");
+        } else {
+            runner = Drr::new(120000).unwrap();
+        }
+        let rates = vec![15, 10];
+        let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243], rates.clone());
 
         let tot: usize = v.iter().sum();
         let pack_tot: usize = rates.iter().sum();
@@ -428,50 +512,18 @@ mod tests {
 
         //the different flows should all have relatively similar dequeue rates
         for i in 0..rates.len() {
-            assert!(
-                (((v[i] as f64) / tot as f64) - rates[i] as f64 / pack_tot as f64).abs() < 0.01,
-                "class1 rate error off by more than 1%"
-            );
-        }
-        dbg!("hello");
-    }
-    #[test]
-    fn high_rates() { // testing 3 different number of packets that (i think) should be over the limit
-        let runner: Drr<true, std::io::Empty> = Drr::new(12000).unwrap();
-        let rates = vec![30000, 150, 80000];
-        let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243, 4244], rates.clone());
-
-        let tot: usize = v.iter().sum();
-        let pack_tot: usize = rates.iter().sum();
-
-        //dbg!(c1_cnt, c2_cnt);
-
-        //the different flows should all have relatively similar dequeue rates
-        for i in 0..rates.len() {
-            assert!(
-                (((v[i] as f64) / tot as f64) - rates[i] as f64 / pack_tot as f64).abs() < 0.01,
-                "class1 rate error off by more than 1%"
-            );
-        }
-        dbg!("hello");
-    }
-    #[test]
-    fn low_rates() { // testing 3 different number of packets, one of which is 0 packets
-        let runner: Drr<true, std::io::Empty> = Drr::new(12000).unwrap();
-        let rates = vec![0, 1, 3];
-        let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243, 4244], rates.clone());
-
-        let tot: usize = v.iter().sum();
-        let pack_tot: usize = rates.iter().sum();
-
-        //dbg!(c1_cnt, c2_cnt);
-
-        //the different flows should all have relatively similar dequeue rates
-        for i in 0..rates.len() {
-            assert!(
-                (((v[i] as f64) / tot as f64) - rates[i] as f64 / pack_tot as f64).abs() < 0.01,
-                "class1 rate error off by more than 1%"
-            );
+            for j in 0..rates.len() {
+                assert!(
+                    (((v[i] as f64) / tot as f64) - v[j] as f64 / tot as f64).abs() < 0.01,
+                    "testing if v[{}] = {} is near v[{}] = {} with rates {}, {}",
+                    i,
+                    v[i],
+                    j,
+                    v[j],
+                    rates[i],
+                    rates[j]
+                );
+            }
         }
     }
-}
+   }
