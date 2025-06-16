@@ -68,12 +68,6 @@ impl<const HASH_PORTS: bool, W: std::io::Write> Drr<HASH_PORTS, W> {
 
 impl<const HASH_PORTS: bool, L: std::io::Write> Scheduler for Drr<HASH_PORTS, L> {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
-        let curr_tot_qsize: usize = self.curr_qsizes.iter().sum();
-        ensure!(
-            curr_tot_qsize + p.buf.len() <= self.limit_bytes,
-            Error::PacketDropped(p)
-        );
-
         // hash p into a queue
         let flow_id = if HASH_PORTS {
             fnv_ports(
@@ -90,6 +84,17 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Scheduler for Drr<HASH_PORTS, L>
         match self.queue_map.entry(flow_id) {
             Entry::Occupied(entry) => {
                 let queue_id = entry.get();
+                let mut numActive: usize = 0;
+                for i in 0..MAX_QUEUES {
+                    if self.curr_qsizes[i] > 0 {
+                        numActive += 1;
+                    }
+                }
+                ensure!(
+                    self.curr_qsizes[*queue_id] + p.buf.len() <= self.limit_bytes / numActive,
+                    Error::PacketDropped(p)
+                );
+
                 self.curr_qsizes[*queue_id] += p.buf.len();
                 self.queues[*queue_id].push_back(p);
                 Ok(())
@@ -108,7 +113,7 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Scheduler for Drr<HASH_PORTS, L>
 
     fn deq(&mut self) -> Result<Option<Pkt>, Report> {
         let mut curr_tot_qsize: usize = 0;
-        for i in 0..32 {
+        for i in 0..MAX_QUEUES {
             curr_tot_qsize += self.queues[i].len();
         }
         if curr_tot_qsize == 0 {
@@ -128,8 +133,8 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Scheduler for Drr<HASH_PORTS, L>
                     } else {
                         self.deficits[self.deq_curr_qid] -= p.buf.len();
                     }
-
                     self.curr_qsizes[self.deq_curr_qid] -= p.buf.len();
+                    self.deq_curr_qid = (self.deq_curr_qid + 1) % self.queues.len();
                     return Ok(Some(p));
                 }
 
@@ -226,16 +231,93 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
         //  debug!("{} {} rate counter log", self.curr_qsizes);
     }
 
-    pub fn log_bool(&mut self, enq:bool){ // helper method for udp debugging, meant to show when enqueing vs dequeing
+    pub fn log_defs(&mut self) {
+        if let Some(log) = self.logger.as_mut() {
+            #[derive(serde::Serialize)]
+            struct Record {
+                unix_time_ms: u128,
+                deficit1: usize,
+                deficit2: usize,
+                queue_one_dest: u16,
+                queue_two_dest: u16,
+            }
+
+            if let Err(err) = log.serialize(Record {
+                unix_time_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+                deficit1: self.deficits[0],
+                deficit2: self.deficits[1],
+                queue_one_dest: {
+                    if self.queues[0].len() >= 1 {
+                        self.queues[0][0].dport
+                    } else {
+                        0
+                    }
+                },
+
+                queue_two_dest: {
+                    if self.queues[1].len() >= 1 {
+                        self.queues[1][0].dport
+                    } else {
+                        0
+                    }
+                },
+            }) {
+                debug!("{} write to logger failed", err);
+            }
+        }
+    }
+    pub fn log_queues(&mut self) {
+        if let Some(log) = self.logger.as_mut() {
+            #[derive(serde::Serialize)]
+            struct Record {
+                unix_time_ms: u128,
+                queue1: usize,
+                queue2: usize,
+                queue_one_dest: u16,
+                queue_two_dest: u16,
+            }
+
+            if let Err(err) = log.serialize(Record {
+                unix_time_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+                queue1: self.curr_qsizes[0],
+                queue2: self.curr_qsizes[1],
+                queue_one_dest: {
+                    if self.queues[0].len() >= 1 {
+                        self.queues[0][0].dport
+                    } else {
+                        0
+                    }
+                },
+
+                queue_two_dest: {
+                    if self.queues[1].len() >= 1 {
+                        self.queues[1][0].dport
+                    } else {
+                        0
+                    }
+                },
+            }) {
+                debug!("{} write to logger failed", err);
+            }
+        }
+    }
+
+    pub fn log_bool(&mut self, enq: bool) {
+        // helper method for udp debugging, meant to show when enqueing vs dequeing
         if let Some(log) = self.logger.as_mut() {
             #[derive(serde::Serialize)]
             struct Record {
                 unix_time_ms: u128,
                 queue_id: usize,
                 queue_size: usize,
-                enq:bool,
+                enq: bool,
                 flows: Vec<String>,
-                
             }
             for i in 0..MAX_QUEUES {
                 // first fill out the vector
@@ -259,7 +341,7 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
                         queue_id: i,
                         queue_size: self.queues[i].len(),
                         flows: flows,
-                        enq:enq,
+                        enq: enq,
                     }) {
                         debug!("{} write to logger failed", err);
                     }
@@ -377,9 +459,9 @@ mod tests {
         let mut d_cnt = 0;
 
         let mut el: Duration = Duration::ZERO;
-        while el < Duration::from_millis(1_000) {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(1000) {
             // only measures deque timing, not searching through list's timing
-            let start = Instant::now();
             let p = match s.deq().expect("dequeue") {
                 None => {
                     cnt_vec.push(d_cnt);
@@ -387,7 +469,6 @@ mod tests {
                 }
                 Some(a) => a,
             };
-            el += start.elapsed();
             if let Some(_) = s.logger {
                 s.log_bool(false);
             }
@@ -415,7 +496,6 @@ mod tests {
         let runner: Drr<true, std::fs::File>;
         if let Ok(new_file) = File::create("testlogs/basic.log") {
             runner = decoy.maybe_with_logger(Some(new_file));
-            dbg!("WORKED!!!!!");
         } else {
             runner = Drr::new(12000).unwrap();
         }
@@ -431,7 +511,7 @@ mod tests {
         // actual test (other tests don't follow this format at all, this only works because these are supposed to be near-equal to each other)
         assert!(
             (((c1_cnt as f64) - (c2_cnt as f64)) / tot as f64).abs() < 0.01,
-            "class1 rate error off by more than 1%"
+            "the two flows are too different"
         );
     }
     /* too many tests were annoying me
@@ -463,17 +543,16 @@ mod tests {
         let runner: Drr<true, std::fs::File>;
         if let Ok(new_file) = File::create("testlogs/diff_rates.log") {
             runner = decoy.maybe_with_logger(Some(new_file));
-            dbg!("WORKED!!!!!");
         } else {
             runner = Drr::new(12000).unwrap();
         }
-        let rates = vec![150, 100];
+        let rates = vec![2000, 100];
         let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243], rates.clone());
 
         let tot: usize = v.iter().sum();
         let pack_tot: usize = rates.iter().sum();
 
-        //dbg!(c1_cnt, c2_cnt);
+        dbg!(c1_cnt, c2_cnt);
 
         //the different flows should all have relatively similar dequeue rates
         for i in 0..rates.len() {
@@ -496,20 +575,16 @@ mod tests {
         // testing 2 unequal number of packets sent
         let decoy: Drr<true, std::fs::File> = Drr::new(120000).unwrap();
         let runner: Drr<true, std::fs::File>;
-        if let Ok(new_file) = File::create("testlogs/diff_rates.log") {
+        if let Ok(new_file) = File::create("testlogs/non_overflow.log") {
             runner = decoy.maybe_with_logger(Some(new_file));
-            dbg!("WORKED!!!!!");
         } else {
             runner = Drr::new(120000).unwrap();
         }
-        let rates = vec![15, 10];
+        let rates = vec![150, 10];
         let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243], rates.clone());
 
         let tot: usize = v.iter().sum();
         let pack_tot: usize = rates.iter().sum();
-
-        //dbg!(c1_cnt, c2_cnt);
-
         //the different flows should all have relatively similar dequeue rates
         for i in 0..rates.len() {
             for j in 0..rates.len() {
@@ -526,4 +601,4 @@ mod tests {
             }
         }
     }
-   }
+}
