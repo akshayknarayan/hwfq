@@ -90,10 +90,12 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Scheduler for Drr<HASH_PORTS, L>
                         numActive += 1;
                     }
                 }
-                ensure!(
-                    self.curr_qsizes[*queue_id] + p.buf.len() <= self.limit_bytes / numActive,
-                    Error::PacketDropped(p)
-                );
+                if (numActive > 0) {
+                    ensure!(
+                        self.curr_qsizes[*queue_id] + p.buf.len() <= self.limit_bytes / numActive,
+                        Error::PacketDropped(p)
+                    );
+                } // as far as i know there isn't a situation where the packet alone would be bigger than the send rate, but i'll update if so
 
                 self.curr_qsizes[*queue_id] += p.buf.len();
                 self.queues[*queue_id].push_back(p);
