@@ -69,6 +69,11 @@ impl<const HASH_PORTS: bool, W: std::io::Write> Drr<HASH_PORTS, W> {
 impl<const HASH_PORTS: bool, L: std::io::Write> Scheduler for Drr<HASH_PORTS, L> {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
         // hash p into a queue
+        // let curr_tot_qsize: usize = self.curr_qsizes.iter().sum();
+        // ensure!(
+        //     curr_tot_qsize + p.buf.len() <= self.limit_bytes,
+        //     Error::PacketDropped(p)
+        // );
         let flow_id = if HASH_PORTS {
             fnv_ports(
                 p.ip_hdr.source,
@@ -84,19 +89,16 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Scheduler for Drr<HASH_PORTS, L>
         match self.queue_map.entry(flow_id) {
             Entry::Occupied(entry) => {
                 let queue_id = entry.get();
-                let mut numActive: usize = 0;
+                let mut numActive: usize = 1;
                 for i in 0..MAX_QUEUES {
-                    if self.curr_qsizes[i] > 0 {
+                    if i != *queue_id && self.curr_qsizes[i] > 0 {
                         numActive += 1;
                     }
                 }
-                if (numActive > 0) {
-                    ensure!(
-                        self.curr_qsizes[*queue_id] + p.buf.len() <= self.limit_bytes / numActive,
-                        Error::PacketDropped(p)
-                    );
-                } // as far as i know there isn't a situation where the packet alone would be bigger than the send rate, but i'll update if so
-
+                ensure!(
+                    self.curr_qsizes[*queue_id] + p.buf.len() <= self.limit_bytes / numActive,
+                    Error::PacketDropped(p)
+                );
                 self.curr_qsizes[*queue_id] += p.buf.len();
                 self.queues[*queue_id].push_back(p);
                 Ok(())
@@ -212,7 +214,7 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
                             let output: String = format!("({}:", prot) + 
                             format!("{}.{}.{}.{} -> ", flow.ip_hdr.source[0], flow.ip_hdr.source[1], flow.ip_hdr.source[2], flow.ip_hdr.source[3]).as_mut_str() +  //source ip
                             format!("{}.{}.{}.{}, ", flow.ip_hdr.destination[0], flow.ip_hdr.destination[1], flow.ip_hdr.destination[2], flow.ip_hdr.destination[3]).as_mut_str() + //dest ip
-                            format!("{} -> {})\n", flow.sport, flow.dport).as_mut_str();
+                            format!("{} -> {})", flow.sport, flow.dport).as_mut_str();
                             flows.push(output);
                         }
                     }
