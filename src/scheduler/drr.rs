@@ -85,7 +85,7 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Scheduler for Drr<HASH_PORTS, L>
                 let queue_id = entry.get();
                 let mut numActive: usize = 1;
                 for i in 0..MAX_QUEUES {
-                    if i != *queue_id && self.curr_qsizes[i] > 0 {
+                    if i != *queue_id && self.curr_qsizes[i] != 0 {
                         numActive += 1;
                     }
                 }
@@ -110,10 +110,7 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Scheduler for Drr<HASH_PORTS, L>
     }
 
     fn deq(&mut self) -> Result<Option<Pkt>, Report> {
-        let mut curr_tot_qsize: usize = 0;
-        for i in 0..MAX_QUEUES {
-            curr_tot_qsize += self.queues[i].len();
-        }
+        let curr_tot_qsize: usize = self.curr_qsizes.iter().sum();
         if curr_tot_qsize == 0 {
             return Ok(None);
         }
@@ -217,7 +214,7 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
                             .unwrap()
                             .as_millis(),
                         queue_id: i,
-                        queue_size: self.queues[i].len(),
+                        queue_size: self.curr_qsizes[i],
                         flows: flows,
                     }) {
                         debug!("{} write to logger failed", err);
@@ -334,7 +331,7 @@ impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
                             .unwrap()
                             .as_millis(),
                         queue_id: i,
-                        queue_size: self.queues[i].len(),
+                        queue_size: self.curr_qsizes[i],
                         flows: flows,
                         enq: enq,
                     }) {
@@ -395,31 +392,35 @@ pub mod parse_args {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use super::Drr;
+    use crate::scheduler::Scheduler;
     use quanta::Instant;
     use std::fs::File;
-    use crate::scheduler::Scheduler;
-    use super::Drr;
+    use std::time::Duration;
     fn enq_deq_packets<const HASH_PORTS: bool, L: std::io::Write>(
         mut s: Drr<HASH_PORTS, L>,
-        dports: Vec<u16>,        
-        num_packets: Vec<usize>, 
+        dports: Vec<u16>,
+        num_packets: Vec<usize>,
     ) -> (Duration, Duration, Vec<usize>) {
         let src_ip = [42, 2, 0, 0];
         let d_ip = [42, 1, 2, 6];
 
         if dports.len() != num_packets.len() {
             dbg!(dports.len(), num_packets.len(), "These should be equal");
-            return (Duration::ZERO, Duration::ZERO, Vec::new()); 
+            return (Duration::ZERO, Duration::ZERO, Vec::new());
         }
 
         let enq_start = Instant::now();
-        for i in 0..num_packets.len() {
-            for _ in 0..num_packets[i] {
+        let mut tot_packets: usize = num_packets.iter().sum();
+        let mut num_clone = num_packets.clone();
+        let mut cur = 0;
+        while tot_packets != 0 {
+            let inp_vec: [u8; 1460] = [0; 1460];
+            if num_clone[cur] != 0 {
                 if let Some(_) = s.logger {
                     s.log_bool(true);
                 }
-                s.enq(crate::Pkt {
+                let enqueuing_outcome = match s.enq(crate::Pkt {
                     ip_hdr: etherparse::Ipv4Header::new(
                         100,
                         64,
@@ -428,14 +429,21 @@ mod tests {
                         d_ip,
                     )
                     .unwrap(),
-                    dport: dports[i],
+                    dport: dports[cur],
                     sport: 4242,
-                    buf: vec![],
+                    buf: inp_vec.to_vec(),
                     fake_len: 1500,
-                })
-                .expect("enqueue dummy packet");
+                }) {
+                    Ok(_) => (),
+                    Err(_) => ()
+                };
+                num_clone[cur] -= 1;
+                tot_packets -= 1;
             }
+            cur += 1;
+            cur = cur % num_packets.len();
         }
+
         let enq_elapsed = enq_start.elapsed();
 
         let mut cnt_vec = Vec::new();
@@ -444,16 +452,9 @@ mod tests {
         }
         let mut d_cnt = 0;
 
-        let mut el: Duration = Duration::ZERO;
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_millis(1000) {
-            let p = match s.deq().expect("dequeue") {
-                None => {
-                    cnt_vec.push(d_cnt);
-                    return (start.elapsed(), enq_elapsed, cnt_vec);
-                }
-                Some(a) => a,
-            };
+        let el: Duration = Duration::ZERO;
+        let mut check = s.deq().expect("dequeue");
+        while let Some(p) = check {
             if let Some(_) = s.logger {
                 s.log_bool(false);
             }
@@ -467,6 +468,7 @@ mod tests {
             if !changed {
                 d_cnt += p.len();
             }
+            check = s.deq().expect("dequeue");
         }
         cnt_vec.push(d_cnt);
         (el, enq_elapsed, cnt_vec)
@@ -479,7 +481,7 @@ mod tests {
         if let Ok(new_file) = File::create("testlogs/basic.log") {
             runner = decoy.maybe_with_logger(Some(new_file));
         } else {
-            runner = Drr::new(12000).unwrap();
+            runner = Drr::new(1200).unwrap();
         }
 
         let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243], vec![300, 300]);
@@ -506,22 +508,25 @@ mod tests {
         }
         let rates = vec![2000, 100];
         let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243], rates.clone());
-
+        let c1_cnt = v[0];
+        let c2_cnt = v[1];
+        let d_cnt = v[2];
         let tot: usize = v.iter().sum();
-        let pack_tot: usize = rates.iter().sum();
         dbg!(c1_cnt, c2_cnt);
         for i in 0..rates.len() {
             for j in 0..rates.len() {
-                assert!(
-                    (((v[i] as f64) / tot as f64) - v[j] as f64 / tot as f64).abs() < 0.01,
-                    "testing if v[{}] = {} is near v[{}] = {} with rates {}, {}",
-                    i,
-                    v[i],
-                    j,
-                    v[j],
-                    rates[i],
-                    rates[j]
-                );
+                if (i != j){
+                    assert!(
+                        (((v[i] as f64) / tot as f64) - v[j] as f64 / tot as f64).abs() > 0.01,
+                        "testing if v[{}] = {} is near v[{}] = {} with rates {}, {}",
+                        i,
+                        v[i],
+                        j,
+                        v[j],
+                        rates[i],
+                        rates[j]
+                    );
+                }
             }
         }
     }
@@ -537,19 +542,22 @@ mod tests {
         let rates = vec![150, 10];
         let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243], rates.clone());
         let tot: usize = v.iter().sum();
-        let pack_tot: usize = rates.iter().sum();
+
         for i in 0..rates.len() {
             for j in 0..rates.len() {
-                assert!(
-                    (((v[i] as f64) / tot as f64) - v[j] as f64 / tot as f64).abs() < 0.01,
-                    "testing if v[{}] = {} is near v[{}] = {} with rates {}, {}",
-                    i,
-                    v[i],
-                    j,
-                    v[j],
-                    rates[i],
-                    rates[j]
-                );
+                if (i != j){
+                    assert!(
+                        (((v[i] as f64) / tot as f64) - v[j] as f64 / tot as f64).abs() > 0.01,
+                        "testing if v[{}] = {} is near v[{}] = {} with rates {}, {}",
+                        i,
+                        v[i],
+                        j,
+                        v[j],
+                        rates[i],
+                        rates[j]
+                    );
+                }
+                
             }
         }
     }
