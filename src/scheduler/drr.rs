@@ -1,7 +1,9 @@
 use super::Scheduler;
 use crate::{Error, Pkt};
 use color_eyre::eyre::{ensure, Report};
+use log::debug;
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
+use std::time::Duration;
 
 // Define constant max number of queues.
 const MAX_QUEUES: usize = 32;
@@ -34,7 +36,7 @@ fn fnv_ports(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, queues: u64) ->
 }
 
 #[derive(Default)]
-pub struct Drr<const HASH_PORTS: bool> {
+pub struct Drr<const HASH_PORTS: bool, L: std::io::Write> {
     limit_bytes: usize,
     queues: [VecDeque<Pkt>; MAX_QUEUES],
     curr_qsizes: [usize; MAX_QUEUES],
@@ -45,11 +47,12 @@ pub struct Drr<const HASH_PORTS: bool> {
     num_queues: usize,
 
     deq_curr_qid: usize,
+    logger: Option<csv::Writer<L>>,
 }
 
-impl<const HASH_PORTS: bool> Drr<HASH_PORTS> {
-    pub fn new(limit_bytes: usize) -> Self {
-        Self {
+impl<const HASH_PORTS: bool, W: std::io::Write> Drr<HASH_PORTS, W> {
+    pub fn new(limit_bytes: usize) -> Result<Self, Report> {
+        Ok(Self {
             limit_bytes,
             queues: Default::default(),
             curr_qsizes: [0usize; MAX_QUEUES],
@@ -58,19 +61,13 @@ impl<const HASH_PORTS: bool> Drr<HASH_PORTS> {
             queue_map: HashMap::new(),
             num_queues: 0,
             deq_curr_qid: 0,
-        }
+            logger: None,
+        })
     }
 }
 
-impl<const HASH_PORTS: bool> Scheduler for Drr<HASH_PORTS> {
+impl<const HASH_PORTS: bool, L: std::io::Write> Scheduler for Drr<HASH_PORTS, L> {
     fn enq(&mut self, p: Pkt) -> Result<(), Report> {
-        let curr_tot_qsize: usize = self.curr_qsizes.iter().sum();
-        ensure!(
-            curr_tot_qsize + p.buf.len() <= self.limit_bytes,
-            Error::PacketDropped(p)
-        );
-
-        // hash p into a queue
         let flow_id = if HASH_PORTS {
             fnv_ports(
                 p.ip_hdr.source,
@@ -86,6 +83,16 @@ impl<const HASH_PORTS: bool> Scheduler for Drr<HASH_PORTS> {
         match self.queue_map.entry(flow_id) {
             Entry::Occupied(entry) => {
                 let queue_id = entry.get();
+                let mut num_active: usize = 1;
+                for i in 0..MAX_QUEUES {
+                    if i != *queue_id && self.curr_qsizes[i] != 0 {
+                        num_active += 1;
+                    }
+                }
+                ensure!(
+                    self.curr_qsizes[*queue_id] + p.buf.len() <= self.limit_bytes / num_active,
+                    Error::PacketDropped(p)
+                );
                 self.curr_qsizes[*queue_id] += p.buf.len();
                 self.queues[*queue_id].push_back(p);
                 Ok(())
@@ -121,8 +128,8 @@ impl<const HASH_PORTS: bool> Scheduler for Drr<HASH_PORTS> {
                     } else {
                         self.deficits[self.deq_curr_qid] -= p.buf.len();
                     }
-
                     self.curr_qsizes[self.deq_curr_qid] -= p.buf.len();
+                    self.deq_curr_qid = (self.deq_curr_qid + 1) % self.queues.len();
                     return Ok(Some(p));
                 }
 
@@ -154,5 +161,403 @@ impl<const HASH_PORTS: bool> Scheduler for Drr<HASH_PORTS> {
     fn set_max_len_bytes(&mut self, bytes: usize) -> Result<(), Report> {
         self.limit_bytes = bytes;
         Ok(())
+    }
+    fn dbg(&mut self, _epoch_dur: Duration) {
+        self.log()
+    }
+}
+
+impl<const HASH_PORTS: bool, L: std::io::Write> Drr<HASH_PORTS, L> {
+    pub fn with_logger(self, w: L) -> Drr<HASH_PORTS, L> {
+        self.maybe_with_logger(Some(w))
+    }
+
+    pub fn maybe_with_logger(self, w: Option<L>) -> Drr<HASH_PORTS, L> {
+        Drr {
+            limit_bytes: self.limit_bytes,
+            queues: self.queues,
+            curr_qsizes: self.curr_qsizes,
+            deficits: self.deficits,
+            quanta: self.quanta,
+            queue_map: self.queue_map,
+            num_queues: self.num_queues,
+            deq_curr_qid: self.deq_curr_qid,
+
+            logger: w.map(|x| csv::WriterBuilder::new().has_headers(false).from_writer(x)),
+        }
+    }
+    pub fn log(&mut self) {
+        if let Some(log) = self.logger.as_mut() {
+            #[derive(serde::Serialize)]
+            struct Record {
+                unix_time_ms: u128,
+                queue_id: usize,
+                queue_size: usize,
+                flows: Vec<String>,
+            }
+            for i in 0..MAX_QUEUES {
+                let mut flows: Vec<String> = Vec::new();
+                if !self.queues[i].is_empty() {
+                    let old_flows = self.queues[i].clone().into_iter();
+                    for flow in old_flows {
+                        if let Some(prot) = flow.ip_hdr.protocol.keyword_str() {
+                            let output: String = format!("({}:", prot) +
+                            format!("{}.{}.{}.{} -> ", flow.ip_hdr.source[0], flow.ip_hdr.source[1], flow.ip_hdr.source[2], flow.ip_hdr.source[3]).as_mut_str() +  //source ip
+                            format!("{}.{}.{}.{}, ", flow.ip_hdr.destination[0], flow.ip_hdr.destination[1], flow.ip_hdr.destination[2], flow.ip_hdr.destination[3]).as_mut_str() + //dest ip
+                            format!("{} -> {})", flow.sport, flow.dport).as_mut_str();
+                            flows.push(output);
+                        }
+                    }
+                    if let Err(err) = log.serialize(Record {
+                        unix_time_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis(),
+                        queue_id: i,
+                        queue_size: self.curr_qsizes[i],
+                        flows,
+                    }) {
+                        debug!("{} write to logger failed", err);
+                    }
+                }
+            }
+        }
+    }
+
+    /*fn log_defs(&mut self) {
+        if let Some(log) = self.logger.as_mut() {
+            #[derive(serde::Serialize)]
+            struct Record {
+                unix_time_ms: u128,
+                deficit1: usize,
+                deficit2: usize,
+                queue_one_dest: u16,
+                queue_two_dest: u16,
+            }
+
+            if let Err(err) = log.serialize(Record {
+                unix_time_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+                deficit1: self.deficits[0],
+                deficit2: self.deficits[1],
+                queue_one_dest: {
+                    if self.queues[0].len() >= 1 {
+                        self.queues[0][0].dport
+                    } else {
+                        0
+                    }
+                },
+
+                queue_two_dest: {
+                    if self.queues[1].len() >= 1 {
+                        self.queues[1][0].dport
+                    } else {
+                        0
+                    }
+                },
+            }) {
+                debug!("{} write to logger failed", err);
+            }
+        }
+    }
+
+    fn log_queues(&mut self) {
+        if let Some(log) = self.logger.as_mut() {
+            #[derive(serde::Serialize)]
+            struct Record {
+                unix_time_ms: u128,
+                queue1: usize,
+                queue2: usize,
+                queue_one_dest: u16,
+                queue_two_dest: u16,
+            }
+
+            if let Err(err) = log.serialize(Record {
+                unix_time_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+                queue1: self.curr_qsizes[0],
+                queue2: self.curr_qsizes[1],
+                queue_one_dest: {
+                    if self.queues[0].len() >= 1 {
+                        self.queues[0][0].dport
+                    } else {
+                        0
+                    }
+                },
+
+                queue_two_dest: {
+                    if self.queues[1].len() >= 1 {
+                        self.queues[1][0].dport
+                    } else {
+                        0
+                    }
+                },
+            }) {
+                debug!("{} write to logger failed", err);
+            }
+        }
+    }
+
+    fn log_bool(&mut self, enq: bool) {
+        if let Some(log) = self.logger.as_mut() {
+            #[derive(serde::Serialize)]
+            struct Record {
+                unix_time_ms: u128,
+                queue_id: usize,
+                queue_size: usize,
+                enq: bool,
+                flows: Vec<String>,
+            }
+            for i in 0..MAX_QUEUES {
+                let mut flows: Vec<String> = Vec::new();
+                if !self.queues[i].is_empty() {
+                    let old_flows = self.queues[i].clone().into_iter();
+                    for flow in old_flows {
+                        if let Some(prot) = flow.ip_hdr.protocol.keyword_str() {
+                            let output: String = format!("({}:", prot) +
+                            format!("{}.{}.{}.{} -> ", flow.ip_hdr.source[0], flow.ip_hdr.source[1], flow.ip_hdr.source[2], flow.ip_hdr.source[3]).as_mut_str() +  //source ip
+                            format!("{}.{}.{}.{}, ", flow.ip_hdr.destination[0], flow.ip_hdr.destination[1], flow.ip_hdr.destination[2], flow.ip_hdr.destination[3]).as_mut_str() + //dest ip
+                            format!("{} -> {})\n", flow.sport, flow.dport).as_mut_str();
+                            flows.push(output);
+                        }
+                    }
+                    if let Err(err) = log.serialize(Record {
+                        unix_time_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis(),
+                        queue_id: i,
+                        queue_size: self.curr_qsizes[i],
+                        flows,
+                        enq,
+                    }) {
+                        debug!("{} write to logger failed", err);
+                    }
+                }
+            }
+        }
+    } */
+}
+
+#[cfg(feature = "drr-argparse")]
+pub mod parse_args {
+    use super::Drr;
+    use clap::Parser;
+    use color_eyre::eyre::Report;
+    use std::{path::PathBuf, str::FromStr};
+    #[derive(Parser, Debug)]
+    #[command(name = "drr")]
+    pub struct Opt {
+        #[arg(short, long)]
+        pub limit_bytes: usize,
+
+        #[arg(long)]
+        pub log_file: Option<PathBuf>,
+    }
+    impl<const HASH_PORTS: bool> FromStr for Drr<HASH_PORTS, std::fs::File> {
+        type Err = Report;
+
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            let sp = s.split_whitespace();
+            let dummy = std::iter::once("tmp");
+            let opt = Opt::try_parse_from(dummy.chain(sp))?;
+            opt.try_into()
+        }
+    }
+    impl<const HASH_PORTS: bool> TryFrom<Opt> for Drr<HASH_PORTS, std::fs::File> {
+        type Error = Report;
+        fn try_from(o: Opt) -> Result<Self, Self::Error> {
+            Ok(Drr::<HASH_PORTS, std::fs::File>::new(o.limit_bytes)?
+                .maybe_with_logger(o.log_file.map(std::fs::File::create).transpose()?))
+        }
+    }
+    #[cfg(test)]
+    mod t {
+        use crate::scheduler::drr::Drr;
+
+        #[test]
+        fn parse_test() {
+            let args = "--limit-bytes=120000";
+            let sp: Vec<_> = args.split_whitespace().collect();
+            dbg!(sp);
+            let x: Drr<false, _> = args.parse().unwrap();
+            assert_eq!(x.limit_bytes, 120000);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Drr;
+    use crate::scheduler::Scheduler;
+    use quanta::Instant;
+    use std::fs::File;
+    use std::time::Duration;
+    fn enq_deq_packets<const HASH_PORTS: bool, L: std::io::Write>(
+        mut s: Drr<HASH_PORTS, L>,
+        dports: Vec<u16>,
+        num_packets: Vec<usize>,
+    ) -> (Duration, Duration, Vec<usize>) {
+        let src_ip = [42, 2, 0, 0];
+        let d_ip = [42, 1, 2, 6];
+
+        if dports.len() != num_packets.len() {
+            dbg!(dports.len(), num_packets.len(), "These should be equal");
+            return (Duration::ZERO, Duration::ZERO, Vec::new());
+        }
+
+        let enq_start = Instant::now();
+        let mut tot_packets: usize = num_packets.iter().sum();
+        let mut num_clone = num_packets.clone();
+        let mut cur = 0;
+        while tot_packets != 0 {
+            let inp_vec: [u8; 1460] = [0; 1460];
+            if num_clone[cur] != 0 {
+                if let Some(_) = s.logger {
+                    s.log();
+                }
+                let _enqueuing_outcome = match s.enq(crate::Pkt {
+                    ip_hdr: etherparse::Ipv4Header::new(
+                        100,
+                        64,
+                        etherparse::IpNumber::TCP,
+                        src_ip,
+                        d_ip,
+                    )
+                    .unwrap(),
+                    dport: dports[cur],
+                    sport: 4242,
+                    buf: inp_vec.to_vec(),
+                    fake_len: 1500,
+                }) {
+                    Ok(_) => (),
+                    Err(_) => (),
+                };
+                num_clone[cur] -= 1;
+                tot_packets -= 1;
+            }
+            cur += 1;
+            cur = cur % num_packets.len();
+        }
+
+        let enq_elapsed = enq_start.elapsed();
+
+        let mut cnt_vec = Vec::new();
+        for _ in 0..dports.len() {
+            cnt_vec.push(0);
+        }
+        let mut d_cnt = 0;
+
+        let el: Duration = Duration::ZERO;
+        let mut check = s.deq().expect("dequeue");
+        while let Some(p) = check {
+            if let Some(_) = s.logger {
+                s.log();
+            }
+            let mut changed: bool = false;
+            for i in 0..dports.len() {
+                if p.dport == dports[i] {
+                    changed = true;
+                    cnt_vec[i] += p.len();
+                }
+            }
+            if !changed {
+                d_cnt += p.len();
+            }
+            check = s.deq().expect("dequeue");
+        }
+        cnt_vec.push(d_cnt);
+        (el, enq_elapsed, cnt_vec)
+    }
+
+    #[test]
+    fn basic() {
+        let decoy: Drr<true, std::fs::File> = Drr::new(12000).unwrap();
+        let runner: Drr<true, std::fs::File>;
+        if let Ok(new_file) = File::create("testlogs/basic.log") {
+            runner = decoy.maybe_with_logger(Some(new_file));
+        } else {
+            runner = Drr::new(1200).unwrap();
+        }
+
+        let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243], vec![300, 300]);
+        let c1_cnt = v[0];
+        let c2_cnt = v[1];
+        let d_cnt = v[2];
+
+        let tot = c1_cnt + c2_cnt + d_cnt;
+        dbg!(c1_cnt, c2_cnt);
+        assert!(
+            (((c1_cnt as f64) - (c2_cnt as f64)) / tot as f64).abs() < 0.01,
+            "the two flows are too different"
+        );
+    }
+
+    #[test]
+    fn diff_rates() {
+        let decoy: Drr<true, std::fs::File> = Drr::new(12000).unwrap();
+        let runner: Drr<true, std::fs::File>;
+        if let Ok(new_file) = File::create("testlogs/diff_rates.log") {
+            runner = decoy.maybe_with_logger(Some(new_file));
+        } else {
+            runner = Drr::new(12000).unwrap();
+        }
+        let rates = vec![2000, 100];
+        let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243], rates.clone());
+        let c1_cnt = v[0];
+        let c2_cnt = v[1];
+        let d_cnt = v[2];
+        let tot: usize = v.iter().sum();
+        dbg!(c1_cnt, c2_cnt);
+        for i in 0..rates.len() {
+            for j in 0..rates.len() {
+                if i != j {
+                    assert!(
+                        (((v[i] as f64) / tot as f64) - v[j] as f64 / tot as f64).abs() < 0.01,
+                        "testing if v[{}] = {} is near v[{}] = {} with rates {}, {}",
+                        i,
+                        v[i],
+                        j,
+                        v[j],
+                        rates[i],
+                        rates[j]
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn diff_non_overflow() {
+        let decoy: Drr<true, std::fs::File> = Drr::new(120000).unwrap();
+        let runner: Drr<true, std::fs::File>;
+        if let Ok(new_file) = File::create("testlogs/non_overflow.log") {
+            runner = decoy.maybe_with_logger(Some(new_file));
+        } else {
+            runner = Drr::new(120000).unwrap();
+        }
+        let rates = vec![150, 10];
+        let (_, _, v) = enq_deq_packets(runner, vec![4242, 4243], rates.clone());
+        let tot: usize = v.iter().sum();
+
+        for i in 0..rates.len() {
+            for j in 0..rates.len() {
+                if i != j {
+                    assert!(
+                        (((v[i] as f64) / tot as f64) - v[j] as f64 / tot as f64).abs() > 0.01,
+                        "testing if v[{}] = {} is near v[{}] = {} with rates {}, {}",
+                        i,
+                        v[i],
+                        j,
+                        v[j],
+                        rates[i],
+                        rates[j]
+                    );
+                }
+            }
+        }
     }
 }

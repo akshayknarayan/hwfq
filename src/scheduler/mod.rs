@@ -43,8 +43,8 @@ pub trait Scheduler {
 mod fifo;
 pub use fifo::Fifo;
 
-mod drr;
-pub use drr::Drr;
+#[cfg(feature = "drr")]
+pub mod drr;
 
 #[cfg(any(feature = "afd", feature = "hdwrr"))]
 pub mod weight_tree;

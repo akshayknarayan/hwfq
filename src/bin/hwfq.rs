@@ -5,7 +5,7 @@ use color_eyre::{
 };
 use hwfq::scheduler::weight_tree::WeightTree;
 use hwfq::scheduler::{
-    ApproximateFairDropping, Drr, Fifo, HierarchicalApproximateFairDropping,
+    drr::Drr, ApproximateFairDropping, Fifo, HierarchicalApproximateFairDropping,
     HierarchicalDeficitWeightedRoundRobin,
 };
 use hwfq::Datapath;
@@ -71,7 +71,7 @@ pub fn main() -> Result<(), Report> {
                     opt.rate_bytes_per_sec
                         .ok_or(eyre!("Pacing rate is required to use scheduler"))?,
                 ),
-                Drr::<false>::new(opt.queue_size_bytes),
+                Drr::<false, std::io::Empty>::new(opt.queue_size_bytes).unwrap(),
             )
             .unwrap();
             s.run().unwrap();

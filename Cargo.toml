@@ -5,9 +5,12 @@ edition = "2021"
 
 [features]
 datapath = ["tun-tap", "libc", "socket2", "pnet", "flume"]
-bin = ["datapath", "clap", "tracing-subscriber", "htb-argparse"]
+bin = ["datapath", "clap", "tracing-subscriber", "htb-argparse", "drr-argparse"]
 afd = ["rand", "yaml-rust"]
 hdwrr = ["yaml-rust"]
+drr = ["csv", "serde"]
+drr-argparse=["clap", "drr", "clap"]
+drr-logging=["clap", "drr", "clap"]
 htb = ["csv", "serde"]
 htb-argparse = ["htb", "clap"]
 hwfq-audit = []
@@ -28,17 +31,18 @@ flume = { version = "0.11", optional = true }
 rand = { version = "0.8", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 tracing-subscriber  = { version = "0.3", optional = true }
+log = "0.4.27"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
 
 [[bin]]
 name = "hwfq"
-required-features = ["bin", "afd", "hdwrr"]
+required-features = ["bin", "afd", "hdwrr", "drr"]
 
 [[bin]]
 name = "policer"
-required-features = ["htb", "bin"]
+required-features = ["drr", "htb", "bin"]
 
 [[bin]]
 name = "uds_out"
@@ -47,3 +51,4 @@ required-features = ["bin"]
 [[example]]
 name = "weight_tree"
 required-features = ["hdwrr"]
+
